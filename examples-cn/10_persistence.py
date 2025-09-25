@@ -24,7 +24,7 @@ api_key = os.getenv("LITELLM_API_KEY")
 assert api_key is not None, "未设置 LITELLM_API_KEY 环境变量。"
 llm = LLM(
     service_id="main-llm",
-    model="openai/qwen3-235b-a22b-instruct-2507",
+    model="openai/Qwen3-Next-80B-A3B-Instruct-FP8",
     base_url="https://oneapi.wchat.cc/v1",
     api_key=SecretStr(api_key),
 )

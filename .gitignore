@@ -203,3 +203,4 @@ cache
 workspace/
 openapi.json
 .client/
+conversation_mapping.json
