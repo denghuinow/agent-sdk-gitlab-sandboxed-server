@@ -26,13 +26,13 @@ assert api_key is not None, "未设置 LITELLM_API_KEY 环境变量。"
 primary_llm = LLM(
     service_id="primary-llm",
     model="openai/qwen3-235b-a22b-instruct-2507",
-    base_url="https://oneapi.wchat.cc/v1",
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     api_key=SecretStr(api_key),
 )
 secondary_llm = LLM(
     service_id="secondary-llm",
     model="litellm_proxy/mistral/devstral-small-2507",
-    base_url="https://oneapi.wchat.cc/v1",
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     api_key=SecretStr(api_key),
 )
 multimodal_router = MultimodalRouter(

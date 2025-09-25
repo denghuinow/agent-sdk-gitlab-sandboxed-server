@@ -23,7 +23,7 @@ llm = LLM(
     service_id="main-llm",
     # model="litellm_proxy/gemini/gemini-2.5-pro",
     model="litellm_proxy/deepseek/deepseek-reasoner",
-    base_url="https://oneapi.wchat.cc/v1",
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     api_key=SecretStr(api_key),
 )
 
