@@ -9,7 +9,7 @@ from urllib.parse import urlparse, urlunparse
 from urllib.request import urlopen
 from fastapi import FastAPI, HTTPException
 from openhands.sdk.conversation.conversation import Conversation
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 from openhands.sdk import LLM, get_logger
 from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
@@ -32,6 +32,103 @@ from openhands.sdk.sandbox.docker import _run, find_available_tcp_port, build_ag
 """
 
 logger = get_logger(__name__)
+
+WORKSPACE_SUBDIR = "workspace"
+CONVERSATION_MAPPING_FILE = "conversation_mapping.json"
+
+
+class ConversationRequest(BaseModel):
+    message: str
+    git_repos: list[str] | None = None
+    git_token: str | None = None
+    workspace_id: str | None = None
+    conversation_id: str | None = None
+
+
+class ConversationResponse(BaseModel):
+    conversation_id: str
+    workspace_id: str
+
+
+def _get_host_workspace_base() -> str:
+    base_dir = os.environ.get(
+        "HOST_WORKSPACE_DIR",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+    )
+    host_workspace = os.path.abspath(base_dir)
+    workspace_root = os.path.join(host_workspace, WORKSPACE_SUBDIR)
+    os.makedirs(workspace_root, exist_ok=True)
+    return host_workspace
+
+
+def _load_conversation_mapping(file_path: str) -> dict[str, str]:
+    if not os.path.exists(file_path):
+        return {}
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except json.JSONDecodeError as exc:
+        logger.error("对话映射文件格式错误: %s", exc)
+        raise HTTPException(status_code=500, detail="对话映射文件格式错误") from exc
+    except OSError as exc:
+        logger.error("读取对话映射失败: %s", exc)
+        raise HTTPException(status_code=500, detail="读取对话映射失败") from exc
+
+
+def _save_conversation_mapping(file_path: str, mapping: dict[str, str]) -> None:
+    try:
+        with open(file_path, "w", encoding="utf-8") as file:
+            json.dump(mapping, file, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        logger.error("保存对话映射失败: %s", exc)
+        raise HTTPException(status_code=500, detail="保存对话映射失败") from exc
+
+
+def _prepare_git_repos(host_dir: str, git_repos: list[str] | None, git_token: str | None) -> None:
+    if not git_repos:
+        return
+
+    token = (git_token or "").strip()
+    for idx, repo_url in enumerate(git_repos):
+        repo_url = repo_url.strip()
+        if not repo_url:
+            continue
+
+        repo_name = repo_url.rstrip("/").split("/")[-1] or f"repo_{idx}"
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+
+        dest_path = os.path.join(host_dir, repo_name)
+        if os.path.exists(dest_path):
+            logger.info("仓库已存在，跳过克隆：%s", repo_url)
+            continue
+
+        clone_url = repo_url
+        if token and token.lower() != "none":
+            parsed = urlparse(repo_url)
+            if parsed.scheme in {"http", "https"} and not parsed.username and parsed.hostname:
+                port = f":{parsed.port}" if parsed.port else ""
+                netloc = f"oauth2:{token}@{parsed.hostname}{port}"
+                clone_url = urlunparse(parsed._replace(netloc=netloc))
+
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", clone_url, dest_path],
+                check=True,
+                cwd=host_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr or str(exc)
+            if token:
+                detail = detail.replace(token, "***")
+                detail = detail.replace(f"oauth2:{token}", "oauth2:***")
+            raise HTTPException(
+                status_code=400,
+                detail=f"克隆仓库失败: {repo_url}\n{detail}",
+            ) from exc
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -154,62 +251,10 @@ class PersistentDockerSandboxedAgentServer(DockerSandboxedAgentServer):
         return self
 
 
-@app.get("/createConversation")
-async def create_conversation(message: str, git_repos: list[str], git_token: str) -> str:
-    """创建一个新的对话"""
-    # 1)创建会话对应的工作目录
-    base_dir = os.environ.get(
-        "HOST_WORKSPACE_DIR",
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-    )
-    host_workspace = os.path.abspath(base_dir)
-    workspace_id = uuid.uuid4()
-    project_workspace_host_dir = os.path.join(
-        host_workspace, "workspace", str(workspace_id))
-    os.makedirs(project_workspace_host_dir, exist_ok=True)
-    
-    # 保存对话ID到工作目录的映射
-    conversation_mapping_file = os.path.join(host_workspace, "workspace/conversation_mapping.json")
-    conversation_id_str = None
-    token = (git_token or "").strip()
-    for idx, repo_url in enumerate(git_repos):
-        repo_url = repo_url.strip()
-        if not repo_url:
-            continue
-        repo_name = repo_url.rstrip("/").split("/")[-1] or f"repo_{idx}"
-        if repo_name.endswith(".git"):
-            repo_name = repo_name[:-4]
-        dest_path = os.path.join(project_workspace_host_dir, repo_name)
-        if os.path.exists(dest_path):
-            logger.info(f"仓库已存在，跳过克隆：{repo_url}")
-            continue
-        clone_url = repo_url
-        if token and token.lower() != "none":
-            parsed = urlparse(repo_url)
-            if parsed.scheme in {"http", "https"} and not parsed.username and parsed.hostname:
-                port = f":{parsed.port}" if parsed.port else ""
-                netloc = f"oauth2:{token}@{parsed.hostname}{port}"
-                clone_url = urlunparse(parsed._replace(netloc=netloc))
-        try:
-            subprocess.run(
-                ["git", "clone", "--depth", "1", clone_url, dest_path],
-                check=True,
-                cwd=project_workspace_host_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            detail = exc.stderr or str(exc)
-            if token:
-                detail = detail.replace(token, "***")
-                detail = detail.replace(f"oauth2:{token}", "oauth2:***")
-            raise HTTPException(
-                status_code=400,
-                detail=f"克隆仓库失败: {repo_url}\n{detail}",
-            ) from exc
+@app.post("/conversation", response_model=ConversationResponse)
+async def handle_conversation(request: ConversationRequest) -> ConversationResponse:
+    """创建或恢复对话。"""
 
-    # 1) 确保我们拥有 LLM API Key
     api_key = os.getenv("LITELLM_API_KEY")
     assert api_key is not None, "未设置 LITELLM_API_KEY 环境变量。"
 
@@ -220,195 +265,105 @@ async def create_conversation(message: str, git_repos: list[str], git_token: str
         api_key=SecretStr(api_key),
     )
 
-    # 2) 为持久化创建宿主机目录
-    host_workspace = os.path.abspath(base_dir)
-    # 3) 使用相同的持久化目录启动容器
-    with PersistentDockerSandboxedAgentServer(
-        base_image="nikolaik/python-nodejs:python3.12-nodejs22",
-        mount_dir=project_workspace_host_dir,
-        # persistent_dirs={
-        #     "/agent-server/workspace/conversations": host_conversations_workspace,       # 持久化Agent工作区数据
-        # },
-    ) as server:
-        # 4) 创建 Agent —— 关键：working_dir 必须是容器内挂载仓库的位置
-        agent = get_default_agent(
-            llm=llm,
-            working_dir="/workspace",
-            cli_mode=True,
-        )
-        agent = agent.model_copy(
-            update={"mcp_config": {}, "security_analyzer": None,"condenser": None})
-        # 5) 与示例 22 相同，设置回调以收集事件
-        received_events: list = []
-        last_event_time = {"ts": time.time()}
-
-        def event_callback(event) -> None:
-            event_type = type(event).__name__
-            logger.info(f"🔔 回调收到事件：{event_type}\n{event}")
-            received_events.append(event)
-            last_event_time["ts"] = time.time()
-
-        # 6) 创建 RemoteConversation 并执行相同的两步任务
-        conversation = Conversation(
-            agent=agent,
-            host=server.base_url,
-            callbacks=[event_callback],
-            visualize=True,
-        )
-        assert isinstance(conversation, RemoteConversation)
-        # TODO 避免阻塞线程
-        conversation_id_str = str(conversation.state.id)
-        try:
-            logger.info(f"\n📋 对话 ID：{conversation.state.id}")
-            logger.info("📝 正在发送消息…")
-            conversation.send_message(message)
-            logger.info("🚀 正在运行对话…")
-            conversation.run()
-            logger.info("✅ 任务完成！")
-            logger.info(f"Agent 状态：{conversation.state.agent_status}")
-
-            # 等待事件稳定（2 秒内无事件）
-            logger.info("⏳ 正在等待事件停止…")
-            while time.time() - last_event_time["ts"] < 2.0:
-                time.sleep(0.1)
-            logger.info("✅ 事件已停止")
-
-        finally:
-            print("\n🧹 正在清理对话…")
-            conversation.close()
-    
-    # 保存对话ID到工作目录的映射
-    try:
-        # 读取现有映射
-        if os.path.exists(conversation_mapping_file):
-            with open(conversation_mapping_file, 'r', encoding='utf-8') as f:
-                mapping = json.load(f)
-        else:
-            mapping = {}
-        
-        # 添加新的映射
-        mapping[conversation_id_str] = str(workspace_id)
-        
-        # 保存映射
-        with open(conversation_mapping_file, 'w', encoding='utf-8') as f:
-            json.dump(mapping, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"已保存对话映射: {conversation_id_str} -> {workspace_id}")
-    except Exception as e:
-        logger.error(f"保存对话映射失败: {e}")
-    
-    return conversation_id_str
-
-
-@app.get("/resumeConversation")
-async def resume_conversation(conversation_id: str, message: str) -> str:
-    """恢复一个已有的对话"""
-    # 1) 确保我们拥有 LLM API Key
-    api_key = os.getenv("LITELLM_API_KEY")
-    assert api_key is not None, "未设置 LITELLM_API_KEY 环境变量。"
-
-    llm = LLM(
-        service_id="main-llm",
-        model="openai/qwen3-235b-a22b-instruct-2507",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        api_key=SecretStr(api_key),
+    host_workspace = _get_host_workspace_base()
+    workspace_root = os.path.join(host_workspace, WORKSPACE_SUBDIR)
+    conversation_mapping_file = os.path.join(
+        workspace_root, CONVERSATION_MAPPING_FILE
     )
-    
-    # 获取会话对应的工作目录
-    base_dir = os.environ.get(
-        "HOST_WORKSPACE_DIR",
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-    )
-    host_workspace = os.path.abspath(base_dir)
-    conversation_mapping_file = os.path.join(host_workspace, "workspace/conversation_mapping.json")
-    
-    try:
-        # 读取对话映射
-        if os.path.exists(conversation_mapping_file):
-            with open(conversation_mapping_file, 'r', encoding='utf-8') as f:
-                mapping = json.load(f)
-            
-            if conversation_id in mapping:
-                workspace_id = mapping[conversation_id]
-                host_working_dir = os.path.join(host_workspace, "workspace", workspace_id)
-                
-                # 检查工作目录是否存在
-                if not os.path.exists(host_working_dir):
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"工作目录不存在: {host_working_dir}"
-                    )
-                
-                logger.info(f"找到对话映射: {conversation_id} -> {workspace_id}")
-            else:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"未找到对话ID的映射: {conversation_id}"
-                )
-        else:
+    conversation_mapping = _load_conversation_mapping(conversation_mapping_file)
+
+    is_resume = bool(request.conversation_id)
+    workspace_id = request.workspace_id
+    conversation_id = request.conversation_id
+
+    if is_resume:
+        if conversation_id not in conversation_mapping:
             raise HTTPException(
                 status_code=404,
-                detail=f"对话映射文件不存在: {conversation_mapping_file}"
+                detail=f"未找到对话ID的映射: {conversation_id}",
             )
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=500,
-            detail="对话映射文件格式错误"
-        )
-    except Exception as e:
-        logger.error(f"获取对话映射失败: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"获取对话映射失败: {str(e)}"
-        )
-    
-    # 3) 使用相同的持久化目录启动容器
+        mapped_workspace_id = conversation_mapping[conversation_id]
+        if workspace_id and workspace_id != mapped_workspace_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "传入的 workspace_id 与会话映射不一致: "
+                    f"{workspace_id} ≠ {mapped_workspace_id}"
+                ),
+            )
+        workspace_id = mapped_workspace_id
+    else:
+        if workspace_id:
+            logger.info("使用已有工作空间: %s", workspace_id)
+        else:
+            workspace_id = str(uuid.uuid4())
+            logger.info("创建新的工作空间: %s", workspace_id)
+
+    workspace_dir = os.path.join(workspace_root, workspace_id)
+    if is_resume:
+        if not os.path.exists(workspace_dir):
+            raise HTTPException(
+                status_code=404,
+                detail=f"工作目录不存在: {workspace_dir}",
+            )
+    else:
+        if request.workspace_id:
+            if not os.path.exists(workspace_dir):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"工作目录不存在: {workspace_dir}",
+                )
+        else:
+            os.makedirs(workspace_dir, exist_ok=True)
+
+    if not is_resume:
+        _prepare_git_repos(workspace_dir, request.git_repos, request.git_token)
+
+    conversation_id_str: str | None = None
     with PersistentDockerSandboxedAgentServer(
         base_image="nikolaik/python-nodejs:python3.12-nodejs22",
-        mount_dir=host_working_dir,
-        # persistent_dirs={
-        #     "/agent-server/workspace/conversations": host_agent_workspace,       # 持久化Agent工作区数据
-        # },
+        mount_dir=workspace_dir,
     ) as server:
-        # 4) 创建 Agent
         agent = get_default_agent(
             llm=llm,
             working_dir="/workspace",
             cli_mode=True,
         )
         agent = agent.model_copy(
-            update={"mcp_config": {}, "security_analyzer": None,"condenser": None})
+            update={"mcp_config": {}, "security_analyzer": None, "condenser": None}
+        )
 
-        # 5) 设置回调
         received_events: list = []
         last_event_time = {"ts": time.time()}
 
         def event_callback(event) -> None:
             event_type = type(event).__name__
-            logger.info(f"🔔 回调收到事件：{event_type}\n{event}")
+            logger.info("🔔 回调收到事件：%s\n%s", event_type, event)
             received_events.append(event)
             last_event_time["ts"] = time.time()
 
-        # 6) 恢复远程对话
-        conversation = Conversation(
+        conversation_kwargs = dict(
             agent=agent,
             host=server.base_url,
             callbacks=[event_callback],
             visualize=True,
-            conversation_id=conversation_id  # 指定要恢复的对话ID
         )
+        if is_resume and conversation_id:
+            conversation_kwargs["conversation_id"] = conversation_id
+
+        conversation = Conversation(**conversation_kwargs)
         assert isinstance(conversation, RemoteConversation)
+        conversation_id_str = str(conversation.state.id)
 
         try:
-            logger.info(f"\n📋 恢复对话 ID：{conversation.state.id}")
+            logger.info("\n📋 对话 ID：%s", conversation.state.id)
             logger.info("📝 正在发送消息…")
-            conversation.send_message(message)
+            conversation.send_message(request.message)
             logger.info("🚀 正在运行对话…")
             conversation.run()
             logger.info("✅ 任务完成！")
-            logger.info(f"Agent 状态：{conversation.state.agent_status}")
+            logger.info("Agent 状态：%s", conversation.state.agent_status)
 
-            # 等待事件稳定（2 秒内无事件）
             logger.info("⏳ 正在等待事件停止…")
             while time.time() - last_event_time["ts"] < 2.0:
                 time.sleep(0.1)
@@ -417,7 +372,16 @@ async def resume_conversation(conversation_id: str, message: str) -> str:
         finally:
             print("\n🧹 正在清理对话…")
             conversation.close()
-    return conversation_id
+
+    if not is_resume and conversation_id_str:
+        conversation_mapping[conversation_id_str] = workspace_id
+        _save_conversation_mapping(conversation_mapping_file, conversation_mapping)
+
+    assert conversation_id_str is not None
+    return ConversationResponse(
+        conversation_id=conversation_id_str,
+        workspace_id=workspace_id,
+    )
 
 
 if __name__ == "__main__":
