@@ -339,7 +339,7 @@ class DockerSandboxedAgentServer:
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.container_id:
             try:
-                _run(["docker", "rm", "-f", self.container_id])
+                _run(["docker", "stop", self.container_id])
             except Exception:
                 pass
         if self._logs_thread:

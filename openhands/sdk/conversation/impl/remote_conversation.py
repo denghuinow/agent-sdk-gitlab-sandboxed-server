@@ -308,6 +308,7 @@ class RemoteConversation(BaseConversation):
                 "agent": agent.model_dump(
                     mode="json", context={"expose_secrets": True}
                 ),
+                "conversation_id": None,
                 "initial_message": None,
                 "max_iterations": max_iteration_per_run,
                 "stuck_detection": stuck_detection,
@@ -323,11 +324,26 @@ class RemoteConversation(BaseConversation):
                 )
             self._id = uuid.UUID(cid)
         else:
-            # Attach to existing
-            self._id = conversation_id
-            # Validate it exists
-            r = self._client.get(f"/api/conversations/{self._id}")
-            r.raise_for_status()
+            # Resume existing conversation with new agent config
+            payload = {
+                "agent": agent.model_dump(
+                    mode="json", context={"expose_secrets": True}
+                ),
+                "conversation_id": str(conversation_id),
+                "initial_message": None,
+                "max_iterations": max_iteration_per_run,
+                "stuck_detection": stuck_detection,
+            }
+            resp = self._client.post("/api/conversations/", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            # Expect a ConversationInfo
+            cid = data.get("id") or data.get("conversation_id")
+            if not cid:
+                raise RuntimeError(
+                    "Invalid response from server: missing conversation id"
+                )
+            self._id = uuid.UUID(cid)
 
         # Initialize the remote state
         self._state = RemoteState(self._client, str(self._id))

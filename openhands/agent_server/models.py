@@ -48,12 +48,15 @@ class SendMessageRequest(BaseModel):
 
 
 class StartConversationRequest(BaseModel):
-    """Payload to create a new conversation.
+    """Payload to create a new conversation or resume an existing one.
 
     Contains an Agent configuration along with conversation-specific options.
     """
 
     agent: AgentBase
+    conversation_id: UUID | None = Field(
+        default=None, description="Optional conversation ID to resume an existing conversation"
+    )
     confirmation_policy: ConfirmationPolicyBase = Field(
         default=NeverConfirm(),
         description="Controls when the conversation will prompt the user before "

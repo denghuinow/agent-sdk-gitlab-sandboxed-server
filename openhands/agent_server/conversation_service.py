@@ -169,38 +169,98 @@ class ConversationService:
     async def start_conversation(
         self, request: StartConversationRequest
     ) -> ConversationInfo:
-        """Start a local event_service and return its id."""
+        """Start a new conversation or resume an existing one."""
         if self._event_services is None:
             raise ValueError("inactive_service")
-        conversation_id = uuid4()
-        stored = StoredConversation(id=conversation_id, **request.model_dump())
-        file_store_path = (
-            self.event_services_path / conversation_id.hex / "event_service"
-        )
-        file_store_path.mkdir(parents=True)
-        event_service = EventService(
-            stored=stored,
-            file_store_path=file_store_path,
-            working_dir=self.workspace_path,
-        )
-
-        # Create subscribers...
-        await event_service.subscribe_to_events(_EventSubscriber(service=event_service))
-        asyncio.gather(
-            *[
-                event_service.subscribe_to_events(
-                    WebhookSubscriber(
-                        service=event_service,
-                        spec=webhook_spec,
-                        session_api_key=self.session_api_key,
+        
+        if request.conversation_id is not None:
+            # Resume existing conversation
+            conversation_id = request.conversation_id
+            event_service = self._event_services.get(conversation_id)
+            if not event_service:
+                # Check if conversation exists in file store but not loaded
+                conversation_dir = self.event_services_path / conversation_id.hex
+                if conversation_dir.exists():
+                    # Load the existing conversation
+                    stored = StoredConversation.model_validate_json(
+                        (conversation_dir / "event_service" / "meta.json").read_text()
                     )
-                )
-                for webhook_spec in self.webhook_specs
-            ]
-        )
+                    # Update the stored configuration with new agent config (including API key)
+                    stored.agent = request.agent
+                    stored.confirmation_policy = request.confirmation_policy
+                    stored.max_iterations = request.max_iterations
+                    stored.stuck_detection = request.stuck_detection
+                    stored.updated_at = utc_now()
+                    
+                    file_store_path = conversation_dir / "event_service"
+                    event_service = EventService(
+                        stored=stored,
+                        file_store_path=file_store_path,
+                        working_dir=self.workspace_path / conversation_id.hex,
+                    )
+                    
+                    # Create subscribers...
+                    await event_service.subscribe_to_events(_EventSubscriber(service=event_service))
+                    asyncio.gather(
+                        *[
+                            event_service.subscribe_to_events(
+                                WebhookSubscriber(
+                                    service=event_service,
+                                    spec=webhook_spec,
+                                    session_api_key=self.session_api_key,
+                                )
+                            )
+                            for webhook_spec in self.webhook_specs
+                        ]
+                    )
+                    
+                    self._event_services[conversation_id] = event_service
+                    await event_service.start()
+                else:
+                    raise ValueError(f"Conversation {conversation_id} does not exist")
+            else:
+                # Update existing loaded conversation with new agent config (including API key)
+                event_service.stored.agent = request.agent
+                event_service.stored.confirmation_policy = request.confirmation_policy
+                event_service.stored.max_iterations = request.max_iterations
+                event_service.stored.stuck_detection = request.stuck_detection
+                event_service.stored.updated_at = utc_now()
+                # Restart the event service to apply new configuration
+                await event_service.close()
+                await event_service.start()
+        else:
+            # Create new conversation
+            conversation_id = uuid4()
+            stored = StoredConversation(id=conversation_id, **request.model_dump())
+            file_store_path = (
+                self.event_services_path / conversation_id.hex / "event_service"
+            )
+            file_store_path.mkdir(parents=True)
+            event_service = EventService(
+                stored=stored,
+                file_store_path=file_store_path,
+                working_dir=self.workspace_path,
+            )
 
-        self._event_services[conversation_id] = event_service
-        await event_service.start()
+            # Create subscribers...
+            await event_service.subscribe_to_events(_EventSubscriber(service=event_service))
+            asyncio.gather(
+                *[
+                    event_service.subscribe_to_events(
+                        WebhookSubscriber(
+                            service=event_service,
+                            spec=webhook_spec,
+                            session_api_key=self.session_api_key,
+                        )
+                    )
+                    for webhook_spec in self.webhook_specs
+                ]
+            )
+
+            self._event_services[conversation_id] = event_service
+            await event_service.start()
+        
+        # Send initial message if provided
         initial_message = request.initial_message
         if initial_message:
             message = Message(
@@ -211,7 +271,7 @@ class ConversationService:
         state = await event_service.get_state()
         conversation_info = _compose_conversation_info(event_service.stored, state)
 
-        # Notify conversation webhooks about the started conversation
+        # Notify conversation webhooks about the started/resumed conversation
         await self._notify_conversation_webhooks(conversation_info)
 
         return conversation_info
@@ -262,12 +322,12 @@ class ConversationService:
         event_services = {}
         for event_service_dir in self.event_services_path.iterdir():
             try:
-                meta_file = event_service_dir / "meta.json"
+                meta_file = event_service_dir / "event_service/meta.json"
                 json_str = meta_file.read_text()
                 id = UUID(event_service_dir.name)
                 event_services[id] = EventService(
                     stored=StoredConversation.model_validate_json(json_str),
-                    file_store_path=self.event_services_path / id.hex,
+                    file_store_path=self.event_services_path / id.hex / "event_service",
                     working_dir=self.workspace_path / id.hex,
                 )
             except Exception:
