@@ -107,7 +107,7 @@ async def create_conversation(message: str, git_repos: list[str], git_token: str
     #    将 LITELLM_API_KEY 转发进容器，方便远程工具使用。
     with DockerSandboxedAgentServer(
         # ghcr.io/all-hands-ai/agent-server:4864c6f-custom-dev
-        base_image="ghcr.io/all-hands-ai/agent-server:4864c6f-custom-dev",
+        base_image="nikolaik/python-nodejs:python3.12-nodejs22",
         mount_dir=host_working_dir,
         # host_port=8010,
         # TODO: 如果不是 linux/arm64，请换成你的平台

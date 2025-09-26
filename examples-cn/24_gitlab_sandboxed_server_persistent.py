@@ -120,7 +120,7 @@ class PersistentDockerSandboxedAgentServer(DockerSandboxedAgentServer):
             "-d",
             "--platform",
             self._platform,
-            # "--rm",  # 注意：我们仍然使用 --rm，但数据通过挂载卷持久化
+            "--rm",
             "--name",
             f"agent-server-{int(time.time())}",
             "-p",
@@ -164,12 +164,12 @@ async def create_conversation(message: str, git_repos: list[str], git_token: str
     )
     host_workspace = os.path.abspath(base_dir)
     workspace_id = uuid.uuid4()
-    host_working_dir = os.path.join(
-        host_workspace, "workspace", str(workspace_id))
-    os.makedirs(host_working_dir, exist_ok=True)
+    project_workspace_host_dir = os.path.join(
+        host_workspace, "workspace/project", str(workspace_id))
+    os.makedirs(project_workspace_host_dir, exist_ok=True)
     
     # 保存对话ID到工作目录的映射
-    conversation_mapping_file = os.path.join(host_workspace, "conversation_mapping.json")
+    conversation_mapping_file = os.path.join(host_workspace, "workspace/conversation_mapping.json")
     conversation_id_str = None
     token = (git_token or "").strip()
     for idx, repo_url in enumerate(git_repos):
@@ -179,7 +179,7 @@ async def create_conversation(message: str, git_repos: list[str], git_token: str
         repo_name = repo_url.rstrip("/").split("/")[-1] or f"repo_{idx}"
         if repo_name.endswith(".git"):
             repo_name = repo_name[:-4]
-        dest_path = os.path.join(host_working_dir, repo_name)
+        dest_path = os.path.join(project_workspace_host_dir, repo_name)
         if os.path.exists(dest_path):
             logger.info(f"仓库已存在，跳过克隆：{repo_url}")
             continue
@@ -194,7 +194,7 @@ async def create_conversation(message: str, git_repos: list[str], git_token: str
             subprocess.run(
                 ["git", "clone", "--depth", "1", clone_url, dest_path],
                 check=True,
-                cwd=host_working_dir,
+                cwd=project_workspace_host_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -222,16 +222,16 @@ async def create_conversation(message: str, git_repos: list[str], git_token: str
 
     # 2) 为持久化创建宿主机目录
     host_workspace = os.path.abspath(base_dir)
-    host_agent_workspace = os.path.join(
-        host_workspace, ".conversations")
-    os.makedirs(host_agent_workspace, exist_ok=True)
+    host_conversations_workspace = os.path.join(
+        host_workspace, "workspace/conversations")
+    os.makedirs(host_conversations_workspace, exist_ok=True)
 
     # 3) 使用相同的持久化目录启动容器
     with PersistentDockerSandboxedAgentServer(
-        base_image="ghcr.io/all-hands-ai/agent-server:4864c6f-custom-dev",
-        mount_dir=host_working_dir,
+        base_image="nikolaik/python-nodejs:python3.12-nodejs22",
+        mount_dir=project_workspace_host_dir,
         persistent_dirs={
-            "/agent-server/workspace/conversations": host_agent_workspace,       # 持久化Agent工作区数据
+            "/agent-server/workspace/conversations": host_conversations_workspace,       # 持久化Agent工作区数据
         },
     ) as server:
         # 4) 创建 Agent —— 关键：working_dir 必须是容器内挂载仓库的位置
@@ -324,7 +324,7 @@ async def resume_conversation(conversation_id: str, message: str) -> str:
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
     )
     host_workspace = os.path.abspath(base_dir)
-    conversation_mapping_file = os.path.join(host_workspace, "conversation_mapping.json")
+    conversation_mapping_file = os.path.join(host_workspace, "workspace/conversation_mapping.json")
     
     try:
         # 读取对话映射
@@ -334,7 +334,7 @@ async def resume_conversation(conversation_id: str, message: str) -> str:
             
             if conversation_id in mapping:
                 workspace_id = mapping[conversation_id]
-                host_working_dir = os.path.join(host_workspace, "workspace", workspace_id)
+                host_working_dir = os.path.join(host_workspace, "workspace/project", workspace_id)
                 
                 # 检查工作目录是否存在
                 if not os.path.exists(host_working_dir):
@@ -367,12 +367,12 @@ async def resume_conversation(conversation_id: str, message: str) -> str:
         )
     
     # 2) 为持久化创建宿主机目录
-    host_agent_workspace = os.path.join(host_workspace, ".conversations")
+    host_agent_workspace = os.path.join(host_workspace, "workspace/conversations")
     os.makedirs(host_agent_workspace, exist_ok=True)
 
     # 3) 使用相同的持久化目录启动容器
     with PersistentDockerSandboxedAgentServer(
-        base_image="ghcr.io/all-hands-ai/agent-server:4864c6f-custom-dev",
+        base_image="nikolaik/python-nodejs:python3.12-nodejs22",
         mount_dir=host_working_dir,
         persistent_dirs={
             "/agent-server/workspace/conversations": host_agent_workspace,       # 持久化Agent工作区数据
