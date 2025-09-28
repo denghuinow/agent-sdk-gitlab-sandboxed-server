@@ -13,7 +13,7 @@ curl -X 'POST' \
       "https://git.wchat.cc/ai/code-helper/exmpler-project/document-management-api.git",
       "https://git.wchat.cc/ai/code-helper/exmpler-project/document-management-web.git"
     ],
-    "git_token": ""
+    "git_token": "$GITLAB_TOKEN"
   }'
 
 echo -e "\n=== 测试 2: 恢复现有对话 ==="
