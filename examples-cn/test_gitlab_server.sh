@@ -4,7 +4,7 @@
 
 echo "=== 测试 1: 创建新对话 ==="
 curl -X 'POST' \
-  'http://localhost:8321/conversation' \
+  'http://localhost:8000/conversation' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -13,18 +13,17 @@ curl -X 'POST' \
       "https://git.wchat.cc/ai/code-helper/exmpler-project/document-management-api.git",
       "https://git.wchat.cc/ai/code-helper/exmpler-project/document-management-web.git"
     ],
-    "git_token": "YOUR_GITLAB_TOKEN_HERE"
+    "git_token": ""
   }'
 
 echo -e "\n=== 测试 2: 恢复现有对话 ==="
 curl -X 'POST' \
-  'http://localhost:8321/conversation' \
+  'http://localhost:8000/conversation' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{
-    "message": "太好了！现在删除那个文件。",
-    "conversation_id": "5252ad4e-5529-448f-adc3-11ce553b216c",
-    "workspace_id": "9f8d3154-9961-4d6e-8320-3815b15fd849"
+    "message": "分析项目生成README.md文件",
+ "conversation_id":"abf70812-5b1c-440e-8971-b19422358b57","workspace_id":"1ba597143aba4b03bde7470d965b4d1c"
   }'
 
 echo -e "\n=== 测试 3: 创建对话但不使用 Git 仓库 ==="

@@ -3,10 +3,8 @@ import subprocess
 import time
 import uuid
 import json
-from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
-from urllib.request import urlopen
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from openhands.sdk.conversation.conversation import Conversation
@@ -15,27 +13,23 @@ from pydantic import BaseModel, SecretStr
 from openhands.sdk import LLM, get_logger
 from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
 from openhands.sdk.preset.default import get_default_agent
-from openhands.sdk.sandbox import DockerSandboxedAgentServer
-from openhands.sdk.sandbox.docker import _run, find_available_tcp_port, build_agent_server_image
+from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build_agent_server_image
 
 
 """
-示例 24：在沙箱化的 Agent Server 中运行 GitLab 集成（支持会话状态持久化）
+示例 25：GitLab 工作空间沙箱服务器（优化版）
 
 本例演示如何：
-  1) 构建并启动 OpenHands Agent Server 的 DEV（源码）Docker 镜像
-  2) 创建一个 FastAPI 应用程序来处理 GitLab 相关操作
+  1) 构建并启动 OpenHands Agent Server 的沙箱环境
+  2) 创建一个 FastAPI 应用来处理 GitLab 相关操作
   3) 与沙箱化的服务器交互以执行 GitLab 任务
-  4) 将会话状态持久化到宿主机文件系统，即使重新创建容器也能保留对话状态
-
-注意：这是扩展版本，通过继承 DockerSandboxedAgentServer 实现持久化，
-而不需要修改 SDK 核心代码。
+  4) 通过简单的目录结构管理会话持久化
 """
 
 logger = get_logger(__name__)
 
 WORKSPACE_SUBDIR = "workspace"
-CONVERSATION_MAPPING_FILE = "conversation_mapping.json"
+MAPPING_FILE = "conversation_mapping.json"
 
 
 class ConversationRequest(BaseModel):
@@ -51,94 +45,171 @@ class ConversationResponse(BaseModel):
     workspace_id: str
 
 
-def _normalize_workspace_id(workspace_id: str) -> str:
-    """去除工作空间 ID 中的无效字符，确保目录命名规范。"""
+def _validate_workspace_id(workspace_id: str) -> str:
+    """验证并清理工作空间 ID，确保目录命名规范。"""
+    if not workspace_id or not workspace_id.strip():
+        raise HTTPException(status_code=400, detail="工作空间 ID 不能为空")
+    
+    # 只保留字母数字和下划线，避免路径遍历攻击
+    import re
+    clean_id = re.sub(r'[^a-zA-Z0-9_]', '', workspace_id.strip())
+    if not clean_id:
+        raise HTTPException(status_code=400, detail="工作空间 ID 包含无效字符")
+    
+    return clean_id
 
-    normalized = workspace_id.strip().replace("-", "")
-    if not normalized:
-        raise HTTPException(status_code=400, detail="工作空间 ID 非法：不能为空或仅包含无效字符")
-    return normalized
 
-
-def _get_host_workspace_base() -> str:
-    base_dir = os.environ.get(
-        "HOST_WORKSPACE_DIR",
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-    )
-    host_workspace = os.path.abspath(base_dir)
-    workspace_root = os.path.join(host_workspace, WORKSPACE_SUBDIR)
+def _get_workspace_root() -> str:
+    """获取工作空间根目录，确保目录存在。"""
+    base_dir = os.environ.get("HOST_WORKSPACE_DIR", os.path.dirname(__file__))
+    workspace_root = os.path.join(base_dir, WORKSPACE_SUBDIR)
     os.makedirs(workspace_root, exist_ok=True)
-    return host_workspace
+    return workspace_root
 
 
-def _load_conversation_mapping(file_path: str) -> dict[str, str]:
-    if not os.path.exists(file_path):
+def _safe_load_mapping(mapping_file: str) -> dict:
+    """安全加载会话映射文件。"""
+    if not os.path.exists(mapping_file):
         return {}
+    
     try:
-        with open(file_path, "r", encoding="utf-8") as file:
-            return json.load(file)
-    except json.JSONDecodeError as exc:
-        logger.error("对话映射文件格式错误: %s", exc)
-        raise HTTPException(status_code=500, detail="对话映射文件格式错误") from exc
-    except OSError as exc:
-        logger.error("读取对话映射失败: %s", exc)
-        raise HTTPException(status_code=500, detail="读取对话映射失败") from exc
+        with open(mapping_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # 验证数据格式
+            if not isinstance(data, dict):
+                raise ValueError("映射文件格式错误：应为字典类型")
+            return data
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error("映射文件格式错误: %s", e)
+        raise HTTPException(status_code=500, detail="映射文件格式错误") from e
+    except OSError as e:
+        logger.error("读取映射文件失败: %s", e)
+        raise HTTPException(status_code=500, detail="读取映射失败") from e
 
 
-def _save_conversation_mapping(file_path: str, mapping: dict[str, str]) -> None:
+def _safe_save_mapping(mapping_file: str, mapping: dict) -> None:
+    """安全保存会话映射文件。"""
     try:
-        with open(file_path, "w", encoding="utf-8") as file:
-            json.dump(mapping, file, ensure_ascii=False, indent=2)
-    except OSError as exc:
-        logger.error("保存对话映射失败: %s", exc)
-        raise HTTPException(status_code=500, detail="保存对话映射失败") from exc
+        with open(mapping_file, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.error("保存映射文件失败: %s", e)
+        raise HTTPException(status_code=500, detail="保存映射失败") from e
 
 
-def _prepare_git_repos(host_dir: str, git_repos: list[str] | None, git_token: str | None) -> None:
+def _clone_repos_safe(project_dir: str, git_repos: list[str], git_token: str = None) -> None:
+    """安全地克隆 Git 仓库到项目目录。"""
     if not git_repos:
         return
 
-    token = (git_token or "").strip()
-    for idx, repo_url in enumerate(git_repos):
+    token = git_token.strip() if git_token else ""
+    
+    for repo_url in git_repos:
         repo_url = repo_url.strip()
         if not repo_url:
             continue
 
-        repo_name = repo_url.rstrip("/").split("/")[-1] or f"repo_{idx}"
-        if repo_name.endswith(".git"):
-            repo_name = repo_name[:-4]
-
-        dest_path = os.path.join(host_dir, repo_name)
-        if os.path.exists(dest_path):
-            logger.info("仓库已存在，跳过克隆：%s", repo_url)
+        # 提取仓库名，防止路径注入
+        repo_name = os.path.basename(repo_url.rstrip('/')).replace('.git', '')
+        if not repo_name:
+            continue
+            
+        # 验证仓库名的安全性
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', repo_name):
+            logger.warning("跳过不安全的仓库名: %s", repo_name)
             continue
 
+        dest_path = os.path.join(project_dir, repo_name)
+        if os.path.exists(dest_path):
+            logger.info("仓库已存在，跳过: %s", repo_url)
+            continue
+
+        # 处理认证
         clone_url = repo_url
         if token and token.lower() != "none":
             parsed = urlparse(repo_url)
-            if parsed.scheme in {"http", "https"} and not parsed.username and parsed.hostname:
-                port = f":{parsed.port}" if parsed.port else ""
-                netloc = f"oauth2:{token}@{parsed.hostname}{port}"
-                clone_url = urlunparse(parsed._replace(netloc=netloc))
+            if parsed.scheme in {"http", "https"} and not parsed.username:
+                clone_url = urlunparse(parsed._replace(
+                    netloc=f"oauth2:{token}@{parsed.netloc}"
+                ))
 
         try:
-            subprocess.run(
-                ["git", "clone", "--depth", "1", clone_url, dest_path],
-                check=True,
-                cwd=host_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            detail = exc.stderr or str(exc)
+            result = subprocess.run([
+                "git", "clone", "--depth", "1", clone_url, dest_path
+            ], check=True, capture_output=True, text=True, timeout=300)
+            logger.info("成功克隆仓库: %s", repo_url)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=408, detail=f"克隆超时: {repo_url}")
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr
             if token:
-                detail = detail.replace(token, "***")
-                detail = detail.replace(f"oauth2:{token}", "oauth2:***")
+                error_msg = error_msg.replace(token, "***")
             raise HTTPException(
-                status_code=400,
-                detail=f"克隆仓库失败: {repo_url}\n{detail}",
-            ) from exc
+                status_code=400, 
+                detail=f"克隆失败: {repo_url}\n{error_msg}"
+            ) from e
+
+
+def _create_sandbox_with_persistence(mount_dir: str):
+    """创建带有持久化挂载的沙箱服务器。"""
+    class PersistentSandbox(DockerSandboxedAgentServer):
+        def __init__(self, mount_dir: str):
+            super().__init__(
+                base_image="nikolaik/python-nodejs:python3.12-nodejs22",
+                mount_dir=mount_dir,
+                host_port=0,  # 自动分配端口
+            )
+            self._mount_dir = mount_dir
+
+        def __enter__(self):
+            # 验证 Docker
+            if _run(["docker", "version"]).returncode != 0:
+                raise RuntimeError("Docker 未运行，请启动 Docker 服务")
+
+            # 构建镜像（如果需要）
+            if self._image and "ghcr.io/all-hands-ai/agent-server" not in self._image:
+                self._image = build_agent_server_image(
+                    base_image=self._image,
+                    target=self._target,
+                    platforms=self._platform,
+                )
+
+            # 准备 Docker 运行参数
+            flags = ["-v", f"{self._mount_dir}:/workspace"]
+            
+            # 添加环境变量
+            for key in self._forward_env:
+                if key in os.environ:
+                    flags.extend(["-e", f"{key}={os.environ[key]}"])
+
+            # 运行容器
+            run_cmd = [
+                "docker", "run", "--user", "0:0", "-d", "--platform", self._platform,
+                "--rm", "--name", f"agent-server-{int(time.time())}-{uuid.uuid4().hex[:8]}",
+                "-p", f"{self.host_port}:8000", *flags, self._image,
+                "--host", "0.0.0.0", "--port", "8000"
+            ]
+            
+            proc = _run(run_cmd)
+            if proc.returncode != 0:
+                raise RuntimeError(f"启动容器失败: {proc.stderr}")
+
+            self.container_id = proc.stdout.strip()
+            logger.info("启动容器: %s", self.container_id)
+
+            # 启动日志线程
+            if self.detach_logs:
+                from threading import Thread
+                self._logs_thread = Thread(target=self._stream_docker_logs, daemon=True)
+                self._logs_thread.start()
+
+            self._wait_for_health()
+            logger.info("API 服务器就绪: %s", self.base_url)
+            return self
+
+    return PersistentSandbox(mount_dir)
+
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -146,119 +217,6 @@ app = FastAPI(
     description="A server for handling GitLab operations with OpenHands agents (with persistence)",
     version="0.1.0"
 )
-
-
-class PersistentDockerSandboxedAgentServer(DockerSandboxedAgentServer):
-    """
-    扩展 DockerSandboxedAgentServer 以支持持久化目录挂载
-    """
-
-    def __init__(
-        self,
-        *,
-        base_image: str,
-        host_port: int | None = None,
-        host: str = "127.0.0.1",
-        forward_env: Iterable[str] | None = None,
-        mount_dir: str | None = None,
-        detach_logs: bool = True,
-        target: str = "source",
-        platform: str = "linux/amd64",
-        persistent_dirs: dict[str, str] | None = None,  # 新增：持久化目录映射
-    ) -> None:
-        super().__init__(
-            base_image=base_image,
-            host_port=host_port,
-            host=host,
-            forward_env=forward_env,
-            mount_dir=mount_dir,
-            detach_logs=detach_logs,
-            target=target,
-            platform=platform,
-        )
-        # 持久化目录映射：容器路径 -> 宿主机路径
-        self.persistent_dirs = persistent_dirs or {}
-
-    def __enter__(self) -> 'PersistentDockerSandboxedAgentServer':
-        # 确保 docker 存在
-        docker_ver = _run(["docker", "version"]).returncode
-        if docker_ver != 0:
-            raise RuntimeError(
-                "Docker is not available. Please install and start "
-                "Docker Desktop/daemon."
-            )
-
-        # 构建镜像（如果需要）
-        if self._image and "ghcr.io/all-hands-ai/agent-server" not in self._image:
-            self._image = build_agent_server_image(
-                base_image=self._image,
-                target=self._target,
-                # 我们只支持单平台
-                platforms=self._platform,
-            )
-
-        # 准备环境标志
-        flags: list[str] = []
-        for key in self._forward_env:
-            if key in os.environ:
-                flags += ["-e", f"{key}={os.environ[key]}"]
-
-        # 准备挂载标志 - 包括工作目录和持久化目录
-        if self.mount_dir:
-            mount_path = "/workspace"
-            flags += ["-v", f"{self.mount_dir}:{mount_path}"]
-            logger.info(
-                "挂载宿主机目录 %s 到容器路径 %s", self.mount_dir, mount_path
-            )
-
-        # 添加持久化目录挂载
-        for container_path, host_path in self.persistent_dirs.items():
-            os.makedirs(host_path, exist_ok=True)  # 确保宿主机目录存在
-            flags += ["-v", f"{host_path}:{container_path}"]
-            logger.info(
-                "持久化挂载宿主机目录 %s 到容器路径 %s", host_path, container_path
-            )
-
-        # 运行容器
-        run_cmd = [
-            "docker",
-            "run",
-            "--user", "0:0",
-            "-d",
-            "--platform",
-            self._platform,
-            "--rm",
-            "--name",
-            f"agent-server-{int(time.time())}",
-            "-p",
-            f"{self.host_port}:8000",
-            *flags,
-            self._image,
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "8000",
-        ]
-        proc = _run(run_cmd)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Failed to run docker container: {proc.stderr}")
-
-        self.container_id = proc.stdout.strip()
-        logger.info("Started container: %s", self.container_id)
-
-        # 可选地在后台流式传输日志
-        if self.detach_logs:
-            from threading import Thread, Event
-            self._logs_thread = Thread(
-                target=self._stream_docker_logs, daemon=True
-            )
-            self._logs_thread.start()
-
-        # 等待健康检查
-        self._wait_for_health()
-        logger.info("API server is ready at %s", self.base_url)
-        return self
 
 
 @app.post("/conversation", response_model=ConversationResponse)
@@ -275,17 +233,17 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
         api_key=SecretStr(api_key),
     )
 
-    host_workspace = _get_host_workspace_base()
+    host_workspace = _get_workspace_root()
     workspace_root = os.path.join(host_workspace, WORKSPACE_SUBDIR)
     conversation_mapping_file = os.path.join(
-        workspace_root, CONVERSATION_MAPPING_FILE
+        workspace_root, MAPPING_FILE
     )
-    conversation_mapping = _load_conversation_mapping(conversation_mapping_file)
+    conversation_mapping = _safe_load_mapping(conversation_mapping_file)
 
     is_resume = bool(request.conversation_id)
     workspace_id = request.workspace_id
     if workspace_id:
-        workspace_id = _normalize_workspace_id(workspace_id)
+        workspace_id = _validate_workspace_id(workspace_id)
     conversation_id = request.conversation_id
 
     if is_resume:
@@ -294,7 +252,7 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
                 status_code=404,
                 detail=f"未找到对话ID的映射: {conversation_id}",
             )
-        mapped_workspace_id = _normalize_workspace_id(conversation_mapping[conversation_id])
+        mapped_workspace_id = _validate_workspace_id(conversation_mapping[conversation_id])
         if workspace_id and workspace_id != mapped_workspace_id:
             raise HTTPException(
                 status_code=400,
@@ -330,13 +288,10 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
     project_dir = os.path.join(workspace_dir, "project")
     os.makedirs(project_dir, exist_ok=True)
     if not is_resume:
-        _prepare_git_repos(project_dir, request.git_repos, request.git_token)
+        _clone_repos_safe(project_dir, request.git_repos or [], request.git_token)
 
     conversation_id_str: str | None = None
-    with PersistentDockerSandboxedAgentServer(
-        base_image="nikolaik/python-nodejs:python3.12-nodejs22",
-        mount_dir=workspace_dir,
-    ) as server:
+    with _create_sandbox_with_persistence(workspace_dir) as server:
         agent = get_default_agent(
             llm=llm,
             working_dir="/workspace/project",
@@ -388,7 +343,7 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
 
     if not is_resume and conversation_id_str:
         conversation_mapping[conversation_id_str] = workspace_id
-        _save_conversation_mapping(conversation_mapping_file, conversation_mapping)
+        _safe_save_mapping(conversation_mapping_file, conversation_mapping)
 
     assert conversation_id_str is not None
     return ConversationResponse(
@@ -401,12 +356,12 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
 async def download_project_file(workspace_id: str, file_path: str) -> FileResponse:
     """下载指定工作空间 project 目录中的文件。"""
 
-    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    normalized_workspace_id = _validate_workspace_id(workspace_id)
     relative_path = file_path.strip()
     if not relative_path:
         raise HTTPException(status_code=400, detail="文件路径不能为空")
 
-    host_workspace = _get_host_workspace_base()
+    host_workspace = _get_workspace_root()
     workspace_dir = Path(host_workspace) / WORKSPACE_SUBDIR / normalized_workspace_id
     project_dir = workspace_dir / "project"
 
