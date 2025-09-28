@@ -196,7 +196,7 @@ class ConversationService:
                     event_service = EventService(
                         stored=stored,
                         file_store_path=file_store_path,
-                        working_dir=self.workspace_path / conversation_id.hex,
+                        working_dir=self.workspace_path,
                     )
                     
                     # Create subscribers...
@@ -308,7 +308,6 @@ class ConversationService:
 
             await event_service.close()
             shutil.rmtree(self.event_services_path / conversation_id.hex)
-            shutil.rmtree(self.workspace_path / conversation_id.hex)
             return True
         return False
 
@@ -328,7 +327,7 @@ class ConversationService:
                 event_services[id] = EventService(
                     stored=StoredConversation.model_validate_json(json_str),
                     file_store_path=self.event_services_path / id.hex / "event_service",
-                    working_dir=self.workspace_path / id.hex,
+                    working_dir=self.workspace_path,
                 )
             except Exception:
                 logger.exception(
