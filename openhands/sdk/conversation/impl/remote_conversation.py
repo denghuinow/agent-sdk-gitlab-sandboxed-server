@@ -31,11 +31,16 @@ class WebSocketCallbackClient:
     """Minimal WS client: connects, forwards events, retries on error."""
 
     def __init__(
-        self, host: str, conversation_id: str, callbacks: list[ConversationCallbackType]
+        self,
+        host: str,
+        conversation_id: str,
+        callbacks: list[ConversationCallbackType],
+        api_key: str | None = None,
     ):
         self.host = host
         self.conversation_id = conversation_id
         self.callbacks = callbacks
+        self.api_key = api_key
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -67,7 +72,11 @@ class WebSocketCallbackClient:
         parsed = urlparse(self.host)
         ws_scheme = "wss" if parsed.scheme == "https" else "ws"
         base = f"{ws_scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-        ws_url = f"{base}/api/conversations/{self.conversation_id}/events/socket"
+        ws_url = f"{base}/sockets/events/{self.conversation_id}"
+
+        # Add API key as query parameter if provided
+        if self.api_key:
+            ws_url += f"?session_api_key={self.api_key}"
 
         delay = 1.0
         while not self._stop.is_set():
@@ -281,6 +290,7 @@ class RemoteConversation(BaseConversation):
         self,
         agent: AgentBase,
         host: str,
+        api_key: str | None = None,
         conversation_id: ConversationID | None = None,
         callbacks: list[ConversationCallbackType] | None = None,
         max_iteration_per_run: int = 500,
@@ -293,13 +303,22 @@ class RemoteConversation(BaseConversation):
         Args:
             agent: Agent configuration (will be sent to the server)
             host: Base URL of the agent server (e.g., http://localhost:3000)
+            api_key: Optional API key for authentication (sent as X-Session-API-Key
+                header)
             conversation_id: Optional existing conversation id to attach to
             callbacks: Optional callbacks to receive events (not yet streamed)
             max_iteration_per_run: Max iterations configured on server
         """
         self.agent = agent
         self._host = host.rstrip("/")
-        self._client = httpx.Client(base_url=self._host, timeout=30.0)
+        self._api_key = api_key
+
+        # Configure httpx client with API key header if provided
+        headers = {}
+        if api_key:
+            headers["X-Session-API-Key"] = api_key
+
+        self._client = httpx.Client(base_url=self._host, timeout=30.0, headers=headers)
         self._callbacks = callbacks or []
         self.max_iteration_per_run = max_iteration_per_run
 
@@ -364,6 +383,7 @@ class RemoteConversation(BaseConversation):
             host=self._host,
             conversation_id=str(self._id),
             callbacks=self._callbacks,
+            api_key=self._api_key,
         )
         self._ws_client.start()
 
@@ -417,7 +437,7 @@ class RemoteConversation(BaseConversation):
             logger.info("Conversation is already running; skipping run trigger")
             return
         resp.raise_for_status()
-        logger.info("run() triggered successfully")
+        logger.info(f"run() triggered successfully: {resp}")
 
     def set_confirmation_policy(self, policy: ConfirmationPolicyBase) -> None:
         payload = {"policy": policy.model_dump()}

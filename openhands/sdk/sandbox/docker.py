@@ -97,14 +97,14 @@ def _resolve_build_script() -> Path | None:
     except Exception:
         pass
 
-    # Try common project layouts relative to CWD and this file
+    # Try common project layouts relative to this file and CWD
     candidates: list[Path] = [
-        Path.cwd() / "openhands" / "agent_server" / "docker" / "build.sh",
         Path(__file__).resolve().parents[3]
         / "openhands"
         / "agent_server"
         / "docker"
         / "build.sh",
+        Path.cwd() / "openhands" / "agent_server" / "docker" / "build.sh",
     ]
     for c in candidates:
         if c.exists():
@@ -209,7 +209,7 @@ class DockerSandboxedAgentServer:
         self._stop_logs = threading.Event()
         self.mount_dir = mount_dir
         self.detach_logs = detach_logs
-        self._forward_env = list(forward_env or [])
+        self._forward_env = list(forward_env or ["DEBUG"])
         self._target = target
         self._platform = platform
 
