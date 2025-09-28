@@ -50,6 +50,15 @@ class ConversationResponse(BaseModel):
     workspace_id: str
 
 
+def _normalize_workspace_id(workspace_id: str) -> str:
+    """去除工作空间 ID 中的无效字符，确保目录命名规范。"""
+
+    normalized = workspace_id.strip().replace("-", "")
+    if not normalized:
+        raise HTTPException(status_code=400, detail="工作空间 ID 非法：不能为空或仅包含无效字符")
+    return normalized
+
+
 def _get_host_workspace_base() -> str:
     base_dir = os.environ.get(
         "HOST_WORKSPACE_DIR",
@@ -274,6 +283,8 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
 
     is_resume = bool(request.conversation_id)
     workspace_id = request.workspace_id
+    if workspace_id:
+        workspace_id = _normalize_workspace_id(workspace_id)
     conversation_id = request.conversation_id
 
     if is_resume:
@@ -282,7 +293,7 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
                 status_code=404,
                 detail=f"未找到对话ID的映射: {conversation_id}",
             )
-        mapped_workspace_id = conversation_mapping[conversation_id]
+        mapped_workspace_id = _normalize_workspace_id(conversation_mapping[conversation_id])
         if workspace_id and workspace_id != mapped_workspace_id:
             raise HTTPException(
                 status_code=400,
@@ -296,7 +307,7 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
         if workspace_id:
             logger.info("使用已有工作空间: %s", workspace_id)
         else:
-            workspace_id = str(uuid.uuid4())
+            workspace_id = uuid.uuid4().hex
             logger.info("创建新的工作空间: %s", workspace_id)
 
     workspace_dir = os.path.join(workspace_root, workspace_id)
