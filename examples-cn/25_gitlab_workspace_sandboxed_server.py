@@ -260,7 +260,7 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
 
     llm = LLM(
         service_id="main-llm",
-        model="openai/qwen3-235b-a22b-instruct-2507",
+        model="openai/qwen3-next-80b-a3b-instruct",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key=SecretStr(api_key),
     )
@@ -315,9 +315,10 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
                 )
         else:
             os.makedirs(workspace_dir, exist_ok=True)
-
+    project_dir = os.path.join(workspace_dir, "project")
+    os.makedirs(project_dir, exist_ok=True)
     if not is_resume:
-        _prepare_git_repos(workspace_dir, request.git_repos, request.git_token)
+        _prepare_git_repos(project_dir, request.git_repos, request.git_token)
 
     conversation_id_str: str | None = None
     with PersistentDockerSandboxedAgentServer(
@@ -326,7 +327,7 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
     ) as server:
         agent = get_default_agent(
             llm=llm,
-            working_dir="/workspace",
+            working_dir="/workspace/project",
             cli_mode=True,
         )
         agent = agent.model_copy(
