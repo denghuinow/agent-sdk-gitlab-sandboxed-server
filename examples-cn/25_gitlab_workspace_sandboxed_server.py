@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from urllib.request import urlopen
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from openhands.sdk.conversation.conversation import Conversation
 from pydantic import BaseModel, SecretStr
 
@@ -394,6 +395,41 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
         conversation_id=conversation_id_str,
         workspace_id=workspace_id,
     )
+
+
+@app.get("/workspace/{workspace_id}/project/file")
+async def download_project_file(workspace_id: str, file_path: str) -> FileResponse:
+    """下载指定工作空间 project 目录中的文件。"""
+
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    relative_path = file_path.strip()
+    if not relative_path:
+        raise HTTPException(status_code=400, detail="文件路径不能为空")
+
+    host_workspace = _get_host_workspace_base()
+    workspace_dir = Path(host_workspace) / WORKSPACE_SUBDIR / normalized_workspace_id
+    project_dir = workspace_dir / "project"
+
+    if not workspace_dir.exists():
+        raise HTTPException(status_code=404, detail="工作空间不存在")
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="project 目录不存在")
+
+    try:
+        project_dir_resolved = project_dir.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="project 目录不存在") from exc
+
+    requested_path = (project_dir / relative_path).resolve(strict=False)
+    try:
+        requested_path.relative_to(project_dir_resolved)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="文件路径越界") from exc
+
+    if not requested_path.exists() or not requested_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    return FileResponse(path=requested_path, filename=requested_path.name)
 
 
 if __name__ == "__main__":
