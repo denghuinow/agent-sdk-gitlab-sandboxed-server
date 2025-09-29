@@ -418,6 +418,43 @@ async def get_conversation_events(workspace_id: str, conversation_id: str) -> di
     }
 
 
+@app.get("/workspace/{workspace_id}/conversations/{conversation_id}/state")
+async def get_conversation_state(workspace_id: str, conversation_id: str) -> dict:
+    """获取指定会话的基础状态。"""
+
+    normalized_workspace_id = _validate_workspace_id(workspace_id)
+    normalized_conversation_id = _validate_conversation_id(conversation_id)
+
+    host_workspace = _get_workspace_root()
+    workspace_dir = Path(host_workspace) / WORKSPACE_SUBDIR / normalized_workspace_id
+    if not workspace_dir.exists() or not workspace_dir.is_dir():
+        raise HTTPException(status_code=404, detail="工作空间不存在")
+
+    conversation_dir = workspace_dir / "conversations" / normalized_conversation_id
+    if not conversation_dir.exists() or not conversation_dir.is_dir():
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    state_file = conversation_dir / "event_service" / "base_state.json"
+    if not state_file.exists() or not state_file.is_file():
+        raise HTTPException(status_code=404, detail="未找到状态文件")
+
+    try:
+        with state_file.open("r", encoding="utf-8") as f:
+            state_data = json.load(f)
+    except json.JSONDecodeError as exc:
+        logger.error("状态文件格式错误: %s", state_file)
+        raise HTTPException(status_code=500, detail="状态文件格式错误") from exc
+    except OSError as exc:
+        logger.error("读取状态文件失败: %s", state_file)
+        raise HTTPException(status_code=500, detail="读取状态文件失败") from exc
+
+    return {
+        "workspace_id": normalized_workspace_id,
+        "conversation_id": normalized_conversation_id,
+        "state": state_data,
+    }
+
+
 @app.get("/workspace/{workspace_id}/project/file")
 async def download_project_file(workspace_id: str, file_path: str) -> FileResponse:
     """下载指定工作空间 project 目录中的文件。"""
