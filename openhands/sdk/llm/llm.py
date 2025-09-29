@@ -191,6 +191,15 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
     service_id: str = Field(
         description="Unique identifier for LLM. Typically used by LLM registry.",
     )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Additional metadata for the LLM instance. "
+            "Example structure: "
+            "{'trace_version': '1.0.0', 'tags': ['model:gpt-4', 'agent:my-agent'], "
+            "'session_id': 'session-123', 'trace_user_id': 'user-456'}"
+        ),
+    )
 
     # =========================================================================
     # Internal fields (excluded from dumps)
@@ -830,21 +839,6 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             v = _cast_value(value, fields[field_name])
             if v is not None:
                 data[field_name] = v
-        return cls(**data)
-
-    @classmethod
-    def load_from_toml(cls, toml_path: str) -> LLM:
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore
-            except ImportError:
-                raise ImportError("tomllib or tomli is required to load TOML files")
-        with open(toml_path, "rb") as f:
-            data = tomllib.load(f)
-        if "llm" in data:
-            data = data["llm"]
         return cls(**data)
 
     def resolve_diff_from_deserialized(self, persisted: LLM) -> LLM:
