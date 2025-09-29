@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -30,6 +31,7 @@ logger = get_logger(__name__)
 
 WORKSPACE_SUBDIR = "workspace"
 MAPPING_FILE = "conversation_mapping.json"
+_EVENT_FILE_PATTERN = re.compile(r"^event-(\d+)-([^.]+)\.json$")
 
 
 class ConversationRequest(BaseModel):
@@ -49,13 +51,24 @@ def _validate_workspace_id(workspace_id: str) -> str:
     """验证并清理工作空间 ID，确保目录命名规范。"""
     if not workspace_id or not workspace_id.strip():
         raise HTTPException(status_code=400, detail="工作空间 ID 不能为空")
-    
+
     # 只保留字母数字和下划线，避免路径遍历攻击
-    import re
     clean_id = re.sub(r'[^a-zA-Z0-9_]', '', workspace_id.strip())
     if not clean_id:
         raise HTTPException(status_code=400, detail="工作空间 ID 包含无效字符")
-    
+
+    return clean_id
+
+
+def _validate_conversation_id(conversation_id: str) -> str:
+    """验证会话 ID，防止路径遍历。"""
+    if not conversation_id or not conversation_id.strip():
+        raise HTTPException(status_code=400, detail="会话 ID 不能为空")
+
+    clean_id = conversation_id.strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", clean_id):
+        raise HTTPException(status_code=400, detail="会话 ID 包含无效字符")
+
     return clean_id
 
 
@@ -95,6 +108,29 @@ def _safe_save_mapping(mapping_file: str, mapping: dict) -> None:
     except OSError as e:
         logger.error("保存映射文件失败: %s", e)
         raise HTTPException(status_code=500, detail="保存映射失败") from e
+
+
+def _event_file_sort_key(path: Path) -> tuple[int, str]:
+    match = _EVENT_FILE_PATTERN.match(path.name)
+    if match:
+        return int(match.group(1)), match.group(2)
+    return 10**12, path.name
+
+
+def _load_events_from_directory(events_dir: Path) -> list[dict]:
+    event_files = sorted(events_dir.glob("event-*-*.json"), key=_event_file_sort_key)
+    events: list[dict] = []
+    for event_file in event_files:
+        try:
+            with event_file.open("r", encoding="utf-8") as f:
+                events.append(json.load(f))
+        except json.JSONDecodeError as exc:
+            logger.error("事件文件格式错误: %s", event_file)
+            raise HTTPException(status_code=500, detail=f"事件文件格式错误: {event_file.name}") from exc
+        except OSError as exc:
+            logger.error("读取事件文件失败: %s", event_file)
+            raise HTTPException(status_code=500, detail="读取事件文件失败") from exc
+    return events
 
 
 def _clone_repos_safe(project_dir: str, git_repos: list[str], git_token: str = None) -> None:
@@ -350,6 +386,36 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
         conversation_id=conversation_id_str,
         workspace_id=workspace_id,
     )
+
+
+@app.get("/workspace/{workspace_id}/conversations/{conversation_id}/events")
+async def get_conversation_events(workspace_id: str, conversation_id: str) -> dict:
+    """获取指定会话的所有事件。"""
+
+    normalized_workspace_id = _validate_workspace_id(workspace_id)
+    normalized_conversation_id = _validate_conversation_id(conversation_id)
+
+    host_workspace = _get_workspace_root()
+    workspace_dir = Path(host_workspace) / WORKSPACE_SUBDIR / normalized_workspace_id
+    if not workspace_dir.exists() or not workspace_dir.is_dir():
+        raise HTTPException(status_code=404, detail="工作空间不存在")
+
+    conversation_dir = workspace_dir / "conversations" / normalized_conversation_id
+    if not conversation_dir.exists() or not conversation_dir.is_dir():
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    events_dir = conversation_dir / "event_service" / "events"
+    if not events_dir.exists() or not events_dir.is_dir():
+        raise HTTPException(status_code=404, detail="未找到事件目录")
+
+    events = _load_events_from_directory(events_dir)
+
+    return {
+        "workspace_id": normalized_workspace_id,
+        "conversation_id": normalized_conversation_id,
+        "event_count": len(events),
+        "events": events,
+    }
 
 
 @app.get("/workspace/{workspace_id}/project/file")
