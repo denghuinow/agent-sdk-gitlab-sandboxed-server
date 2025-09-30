@@ -269,8 +269,7 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
         api_key=SecretStr(api_key),
     )
 
-    host_workspace = _get_workspace_root()
-    workspace_root = os.path.join(host_workspace, WORKSPACE_SUBDIR)
+    workspace_root = _get_workspace_root()
     conversation_mapping_file = os.path.join(
         workspace_root, MAPPING_FILE
     )
@@ -395,8 +394,8 @@ async def get_conversation_events(workspace_id: str, conversation_id: str) -> di
     normalized_workspace_id = _validate_workspace_id(workspace_id)
     normalized_conversation_id = _validate_conversation_id(conversation_id)
 
-    host_workspace = _get_workspace_root()
-    workspace_dir = Path(host_workspace) / WORKSPACE_SUBDIR / normalized_workspace_id
+    workspace_root = Path(_get_workspace_root())
+    workspace_dir = workspace_root / normalized_workspace_id
     if not workspace_dir.exists() or not workspace_dir.is_dir():
         raise HTTPException(status_code=404, detail="工作空间不存在")
 
@@ -425,8 +424,8 @@ async def get_conversation_state(workspace_id: str, conversation_id: str) -> dic
     normalized_workspace_id = _validate_workspace_id(workspace_id)
     normalized_conversation_id = _validate_conversation_id(conversation_id)
 
-    host_workspace = _get_workspace_root()
-    workspace_dir = Path(host_workspace) / WORKSPACE_SUBDIR / normalized_workspace_id
+    workspace_root = Path(_get_workspace_root())
+    workspace_dir = workspace_root / normalized_workspace_id
     if not workspace_dir.exists() or not workspace_dir.is_dir():
         raise HTTPException(status_code=404, detail="工作空间不存在")
 
@@ -464,8 +463,8 @@ async def download_project_file(workspace_id: str, file_path: str) -> FileRespon
     if not relative_path:
         raise HTTPException(status_code=400, detail="文件路径不能为空")
 
-    host_workspace = _get_workspace_root()
-    workspace_dir = Path(host_workspace) / WORKSPACE_SUBDIR / normalized_workspace_id
+    workspace_root = Path(_get_workspace_root())
+    workspace_dir = workspace_root / normalized_workspace_id
     project_dir = workspace_dir / "project"
 
     if not workspace_dir.exists():
