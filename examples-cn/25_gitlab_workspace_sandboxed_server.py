@@ -13,7 +13,7 @@ from pydantic import BaseModel, SecretStr
 
 from openhands.sdk import LLM, get_logger
 from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
-from openhands.sdk.preset.default import get_default_agent
+from openhands.tools.preset.default import get_default_agent
 from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build_agent_server_image
 
 

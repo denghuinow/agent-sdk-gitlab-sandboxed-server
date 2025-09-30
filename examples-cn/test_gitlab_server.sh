@@ -22,8 +22,8 @@ curl -X 'POST' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{
-    "message": "分析项目生成README.md文件",
- "conversation_id":"abf70812-5b1c-440e-8971-b19422358b57","workspace_id":"1ba597143aba4b03bde7470d965b4d1c"
+    "message": "总结你的工作内容，写入到summary.txt文件中",
+ "conversation_id":"2d05dd9d-891a-4bd7-9c12-94ed9a565148","workspace_id":"4c3f228b60c143ac9e08c352a9967ef2"
   }'
 
 echo -e "\n=== 测试 3: 创建对话但不使用 Git 仓库 ==="
