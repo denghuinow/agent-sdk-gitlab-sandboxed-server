@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import subprocess
@@ -7,7 +8,7 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from openhands.sdk.conversation.conversation import Conversation
 from pydantic import BaseModel, SecretStr
 
@@ -255,9 +256,14 @@ app = FastAPI(
 )
 
 
-@app.post("/conversation", response_model=ConversationResponse)
-async def handle_conversation(request: ConversationRequest) -> ConversationResponse:
-    """创建或恢复对话。"""
+def _format_sse(event: str, data: dict) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@app.post("/conversation")
+async def handle_conversation(request: ConversationRequest) -> StreamingResponse:
+    """创建或恢复对话，并通过 SSE 推送事件。"""
 
     api_key = os.getenv("LITELLM_API_KEY")
     assert api_key is not None, "未设置 LITELLM_API_KEY 环境变量。"
@@ -325,66 +331,140 @@ async def handle_conversation(request: ConversationRequest) -> ConversationRespo
     if not is_resume:
         _clone_repos_safe(project_dir, request.git_repos or [], request.git_token)
 
-    conversation_id_str: str | None = None
-    with _create_sandbox_with_persistence(workspace_dir) as server:
-        agent = get_default_agent(
-            llm=llm,
-            working_dir="/workspace/project",
-            cli_mode=True,
-        )
-        agent = agent.model_copy(
-            update={"mcp_config": {}, "security_analyzer": None, "condenser": None}
-        )
+    async def event_stream():
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        conversation_id_holder: dict[str | None] = {"id": None}
 
-        received_events: list = []
-        last_event_time = {"ts": time.time()}
+        def push_event(event_name: str, data: dict) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, _format_sse(event_name, data))
 
-        def event_callback(event) -> None:
-            event_type = type(event).__name__
-            logger.info("🔔 回调收到事件：%s\n%s", event_type, event)
-            received_events.append(event)
-            last_event_time["ts"] = time.time()
+        def finish_stream() -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        conversation_kwargs = dict(
-            agent=agent,
-            host=server.base_url,
-            callbacks=[event_callback],
-            visualize=True,
-        )
-        if is_resume and conversation_id:
-            conversation_kwargs["conversation_id"] = conversation_id
+        def worker() -> None:
+            nonlocal conversation_mapping
+            conversation: RemoteConversation | None = None
+            try:
+                with _create_sandbox_with_persistence(workspace_dir) as server:
+                    agent = get_default_agent(
+                        llm=llm,
+                        working_dir="/workspace/project",
+                        cli_mode=True,
+                    )
+                    agent = agent.model_copy(
+                        update={
+                            "mcp_config": {},
+                            "security_analyzer": None,
+                            "condenser": None,
+                        }
+                    )
 
-        conversation = Conversation(**conversation_kwargs)
-        assert isinstance(conversation, RemoteConversation)
-        conversation_id_str = str(conversation.state.id)
+                    last_event_time = {"ts": time.time()}
+
+                    def event_callback(event) -> None:
+                        event_type = type(event).__name__
+                        logger.info("🔔 回调收到事件：%s\n%s", event_type, event)
+                        last_event_time["ts"] = time.time()
+                        payload = event.model_dump(mode="json")  # type: ignore[arg-type]
+                        payload["event_type"] = event_type
+                        payload["conversation_id"] = conversation_id_holder["id"]
+                        payload["workspace_id"] = workspace_id
+                        push_event("agent-event", payload)
+
+                    conversation_kwargs = dict(
+                        agent=agent,
+                        host=server.base_url,
+                        callbacks=[event_callback],
+                        visualize=True,
+                    )
+                    if is_resume and conversation_id:
+                        conversation_kwargs["conversation_id"] = conversation_id
+
+                    conversation = Conversation(**conversation_kwargs)
+                    assert isinstance(conversation, RemoteConversation)
+                    conversation_id_str = str(conversation.state.id)
+                    conversation_id_holder["id"] = conversation_id_str
+                    push_event(
+                        "conversation-ready",
+                        {
+                            "conversation_id": conversation_id_str,
+                            "workspace_id": workspace_id,
+                            "is_resume": is_resume,
+                        },
+                    )
+
+                    logger.info("\n📋 对话 ID：%s", conversation.state.id)
+                    logger.info("📝 正在发送消息…")
+                    conversation.send_message(request.message)
+                    push_event(
+                        "message-queued",
+                        {
+                            "conversation_id": conversation_id_str,
+                            "workspace_id": workspace_id,
+                            "message": request.message,
+                        },
+                    )
+
+                    logger.info("🚀 正在运行对话…")
+                    conversation.run()
+                    logger.info("✅ 任务完成！")
+                    logger.info("Agent 状态：%s", conversation.state.agent_status)
+                    push_event(
+                        "conversation-finished",
+                        {
+                            "conversation_id": conversation_id_str,
+                            "workspace_id": workspace_id,
+                            "agent_status": conversation.state.agent_status,
+                        },
+                    )
+
+                    logger.info("⏳ 正在等待事件停止…")
+                    while time.time() - last_event_time["ts"] < 2.0:
+                        time.sleep(0.1)
+                    logger.info("✅ 事件已停止")
+
+                    if not is_resume and conversation_id_str:
+                        conversation_mapping[conversation_id_str] = workspace_id
+                        _safe_save_mapping(conversation_mapping_file, conversation_mapping)
+
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("会话处理失败")
+                push_event(
+                    "error",
+                    {
+                        "message": str(exc),
+                        "workspace_id": workspace_id,
+                        "conversation_id": conversation_id_holder["id"],
+                    },
+                )
+            finally:
+                if conversation is not None:
+                    try:
+                        conversation.close()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("关闭会话失败")
+                push_event(
+                    "cleanup-complete",
+                    {
+                        "conversation_id": conversation_id_holder["id"],
+                        "workspace_id": workspace_id,
+                    },
+                )
+                finish_stream()
+
+        worker_task = asyncio.create_task(asyncio.to_thread(worker))
 
         try:
-            logger.info("\n📋 对话 ID：%s", conversation.state.id)
-            logger.info("📝 正在发送消息…")
-            conversation.send_message(request.message)
-            logger.info("🚀 正在运行对话…")
-            conversation.run()
-            logger.info("✅ 任务完成！")
-            logger.info("Agent 状态：%s", conversation.state.agent_status)
-
-            logger.info("⏳ 正在等待事件停止…")
-            while time.time() - last_event_time["ts"] < 2.0:
-                time.sleep(0.1)
-            logger.info("✅ 事件已停止")
-
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                yield chunk
         finally:
-            print("\n🧹 正在清理对话…")
-            conversation.close()
+            await worker_task
 
-    if not is_resume and conversation_id_str:
-        conversation_mapping[conversation_id_str] = workspace_id
-        _safe_save_mapping(conversation_mapping_file, conversation_mapping)
-
-    assert conversation_id_str is not None
-    return ConversationResponse(
-        conversation_id=conversation_id_str,
-        workspace_id=workspace_id,
-    )
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/workspace/{workspace_id}/conversations/{conversation_id}/events")
