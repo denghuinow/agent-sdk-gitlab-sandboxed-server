@@ -193,7 +193,7 @@ def _create_sandbox_with_persistence(mount_dir: str):
     class PersistentSandbox(DockerSandboxedAgentServer):
         def __init__(self, mount_dir: str):
             super().__init__(
-                base_image="nikolaik/python-nodejs:python3.12-nodejs22",
+                base_image="ghcr.io/all-hands-ai/agent-server:latest-python",
                 mount_dir=mount_dir,
                 host_port=0,  # 自动分配端口
             )
