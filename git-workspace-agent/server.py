@@ -19,12 +19,12 @@ from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build
 
 
 """
-示例 25：GitLab 工作空间沙箱服务器（优化版）
+示例 25：Git 工作区沙箱服务器（优化版）
 
 本例演示如何：
   1) 构建并启动 OpenHands Agent Server 的沙箱环境
-  2) 创建一个 FastAPI 应用来处理 GitLab 相关操作
-  3) 与沙箱化的服务器交互以执行 GitLab 任务
+  2) 创建一个 FastAPI 应用来处理 Git 仓库操作
+ 3) 与沙箱化的服务器交互以执行 Git 任务
   4) 通过简单的目录结构管理会话持久化
 """
 
@@ -33,6 +33,8 @@ logger = get_logger(__name__)
 WORKSPACE_SUBDIR = "workspace"
 MAPPING_FILE = "conversation_mapping.json"
 _EVENT_FILE_PATTERN = re.compile(r"^event-(\d+)-([^.]+)\.json$")
+FRONTEND_DIR = Path(__file__).with_name("frontend")
+FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 
 
 class ConversationRequest(BaseModel):
@@ -250,10 +252,18 @@ def _create_sandbox_with_persistence(mount_dir: str):
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title="GitLab Integration Server",
-    description="A server for handling GitLab operations with OpenHands agents (with persistence)",
+    title="Git Integration Server",
+    description="A server for handling Git repository operations with OpenHands agents (with persistence)",
     version="0.1.0"
 )
+
+
+@app.get("/")
+def serve_frontend() -> FileResponse:
+    """提供最简单的前端页面，便于直接访问服务。"""
+    if not FRONTEND_INDEX.exists():
+        raise HTTPException(status_code=503, detail="前端界面尚未部署")
+    return FileResponse(FRONTEND_INDEX)
 
 
 def _format_sse(event: str, data: dict) -> str:

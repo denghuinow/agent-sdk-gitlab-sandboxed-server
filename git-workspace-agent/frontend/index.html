@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GitLab 工作区沙箱服务器控制台</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f5f5f7;
+        color: #111;
+      }
+      body {
+        margin: 0;
+        padding: 0 1.5rem 2rem;
+        max-width: 1200px;
+        margin-inline: auto;
+      }
+      h1 {
+        font-size: 1.75rem;
+        margin: 1.5rem 0 1rem;
+      }
+      form {
+        display: grid;
+        gap: 1rem;
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 0.75rem;
+        padding: 1.5rem;
+        backdrop-filter: blur(4px);
+        box-shadow: 0 15px 35px rgba(30, 41, 59, 0.08);
+      }
+      fieldset {
+        border: 0;
+        padding: 0;
+        margin: 0;
+      }
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        font-weight: 600;
+      }
+      textarea,
+      input {
+        font: inherit;
+        padding: 0.6rem 0.75rem;
+        border-radius: 0.6rem;
+        border: 1px solid rgba(15, 23, 42, 0.15);
+        background: rgba(255, 255, 255, 0.95);
+        color: inherit;
+        resize: vertical;
+        min-height: 2.75rem;
+      }
+      textarea {
+        min-height: 6rem;
+      }
+      input:focus,
+      textarea:focus {
+        outline: 2px solid #2563eb;
+        outline-offset: 1px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+      }
+      button {
+        cursor: pointer;
+        font: inherit;
+        border-radius: 999px;
+        padding: 0.65rem 1.5rem;
+        border: 0;
+        background: #2563eb;
+        color: #fff;
+        font-weight: 600;
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+      }
+      button:disabled {
+        background: rgba(37, 99, 235, 0.55);
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+      button:not(:disabled):hover {
+        transform: translateY(-1px);
+        box-shadow: 0 8px 16px rgba(37, 99, 235, 0.26);
+      }
+      button.secondary {
+        background: #64748b;
+      }
+      #summary {
+        display: grid;
+        gap: 0.5rem;
+        margin-top: 1.5rem;
+        padding: 1rem 1.25rem;
+        border-radius: 0.75rem;
+        border: 1px solid rgba(15, 23, 42, 0.12);
+        background: rgba(248, 250, 252, 0.9);
+        font-size: 0.95rem;
+      }
+      #summary strong {
+        font-weight: 700;
+      }
+      #log {
+        margin-top: 1.5rem;
+        height: 420px;
+        overflow: auto;
+        padding: 1rem;
+        border-radius: 0.75rem;
+        border: 1px solid rgba(100, 116, 139, 0.25);
+        background: #0f172a;
+        color: #f8fafc;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.9rem;
+        line-height: 1.4;
+        box-shadow: inset 0 12px 24px rgba(15, 23, 42, 0.45);
+      }
+      .log-entry {
+        margin-bottom: 1rem;
+      }
+      .log-entry header {
+        font-weight: 700;
+        margin-bottom: 0.35rem;
+      }
+      .log-entry pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .log-info header {
+        color: #22d3ee;
+      }
+      .log-warn header {
+        color: #facc15;
+      }
+      .log-error header {
+        color: #f87171;
+      }
+      .muted {
+        color: rgba(15, 23, 42, 0.65);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          background: #0f172a;
+          color: #e2e8f0;
+        }
+        form {
+          background: rgba(15, 23, 42, 0.65);
+          border-color: rgba(148, 163, 184, 0.12);
+        }
+        textarea,
+        input {
+          background: rgba(15, 23, 42, 0.8);
+          border-color: rgba(148, 163, 184, 0.3);
+        }
+        #summary {
+          background: rgba(30, 41, 59, 0.75);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>GitLab 工作区沙箱服务器控制台</h1>
+    <form id="conversationForm">
+      <fieldset>
+        <label for="message">
+          任务描述
+          <textarea id="message" name="message" placeholder="告诉代理你希望完成的具体任务" required></textarea>
+        </label>
+      </fieldset>
+      <fieldset>
+        <label for="gitRepos">
+          Git 仓库列表（每行一个）
+          <textarea id="gitRepos" name="gitRepos" placeholder="https://git.example.com/group/repo.git&#10;https://git.example.com/group/another.git"></textarea>
+        </label>
+      </fieldset>
+      <fieldset>
+        <label for="gitToken">
+          Git 访问令牌（可选）
+          <input id="gitToken" name="gitToken" type="password" autocomplete="off" placeholder="glpat-***" />
+        </label>
+      </fieldset>
+      <fieldset>
+        <label for="workspaceId">
+          工作区 ID（可选，用于复用已有工作区）
+          <input id="workspaceId" name="workspaceId" type="text" autocomplete="off" placeholder="已有工作区 ID" />
+        </label>
+      </fieldset>
+      <fieldset>
+        <label for="conversationId">
+          会话 ID（可选，用于恢复已有会话）
+          <input id="conversationId" name="conversationId" type="text" autocomplete="off" placeholder="已有会话 ID" />
+        </label>
+      </fieldset>
+      <div class="actions">
+        <button id="startButton" type="submit">启动会话</button>
+        <button id="stopButton" class="secondary" type="button" disabled>停止</button>
+        <span id="statusHint" class="muted">就绪。</span>
+      </div>
+    </form>
+    <section id="summary">
+      <div><strong>工作区:</strong> <span id="summaryWorkspaceId" class="muted">—</span></div>
+      <div><strong>会话:</strong> <span id="summaryConversationId" class="muted">—</span></div>
+      <div><strong>最新状态:</strong> <span id="summaryStatus" class="muted">空闲</span></div>
+    </section>
+    <section>
+      <h2>事件流</h2>
+      <div id="log" aria-live="polite"></div>
+    </section>
+
+    <script>
+      const form = document.getElementById("conversationForm");
+      const startButton = document.getElementById("startButton");
+      const stopButton = document.getElementById("stopButton");
+      const statusHint = document.getElementById("statusHint");
+      const summaryWorkspaceId = document.getElementById("summaryWorkspaceId");
+      const summaryConversationId = document.getElementById("summaryConversationId");
+      const summaryStatus = document.getElementById("summaryStatus");
+      const logContainer = document.getElementById("log");
+
+      let controller = null;
+      let currentConversationId = null;
+      let currentWorkspaceId = null;
+
+      function setBusy(isBusy) {
+        startButton.disabled = isBusy;
+        stopButton.disabled = !isBusy;
+        statusHint.textContent = isBusy ? "执行中…" : "就绪。";
+      }
+
+      function resetSummary() {
+        currentConversationId = null;
+        currentWorkspaceId = null;
+        summaryWorkspaceId.textContent = "—";
+        summaryWorkspaceId.classList.add("muted");
+        summaryConversationId.textContent = "—";
+        summaryConversationId.classList.add("muted");
+        summaryStatus.textContent = "空闲";
+        summaryStatus.classList.add("muted");
+      }
+
+      function updateSummary({ workspaceId, conversationId, status }) {
+        if (workspaceId) {
+          currentWorkspaceId = workspaceId;
+          summaryWorkspaceId.textContent = workspaceId;
+          summaryWorkspaceId.classList.remove("muted");
+        }
+        if (conversationId) {
+          currentConversationId = conversationId;
+          summaryConversationId.textContent = conversationId;
+          summaryConversationId.classList.remove("muted");
+        }
+        if (status) {
+          summaryStatus.textContent = status;
+          summaryStatus.classList.remove("muted");
+        }
+      }
+
+      function appendLog(eventType, payload, level = "info") {
+        const entry = document.createElement("article");
+        entry.className = `log-entry log-${level}`;
+
+        const header = document.createElement("header");
+        const timestamp = new Date().toLocaleTimeString();
+        header.textContent = `[${timestamp}] ${eventType}`;
+
+        const pre = document.createElement("pre");
+        try {
+          pre.textContent = JSON.stringify(payload, null, 2);
+        } catch (err) {
+          pre.textContent = String(payload ?? "");
+        }
+
+        entry.append(header, pre);
+        logContainer.append(entry);
+        logContainer.scrollTop = logContainer.scrollHeight;
+      }
+
+      function clearLog() {
+        logContainer.textContent = "";
+      }
+
+      function parseSseChunk(chunk) {
+        const lines = chunk.split("\n");
+        const dataLines = [];
+        let eventType = "message";
+        for (const rawLine of lines) {
+          const line = rawLine.trimEnd();
+          if (!line) {
+            continue;
+          }
+          if (line.startsWith("event:")) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+        }
+        return { eventType, data: dataLines.join("\n") };
+      }
+
+      function handleEvent(eventType, payload) {
+        const level = eventType === "error" ? "error" : "info";
+        appendLog(eventType, payload, level);
+
+        if (payload?.workspace_id) {
+          updateSummary({ workspaceId: payload.workspace_id });
+        }
+        if (payload?.conversation_id) {
+          updateSummary({ conversationId: payload.conversation_id });
+        }
+
+        if (eventType === "conversation-ready") {
+          updateSummary({ status: "就绪" });
+        } else if (eventType === "message-queued") {
+          updateSummary({ status: "排队中" });
+        } else if (eventType === "conversation-finished") {
+          updateSummary({ status: payload?.agent_status ?? "已完成" });
+        } else if (eventType === "cleanup-complete") {
+          updateSummary({ status: "清理完成" });
+        } else if (eventType === "error") {
+          updateSummary({ status: "错误" });
+        } else if (eventType === "agent-event" && payload?.event_type) {
+          updateSummary({ status: payload.event_type });
+        }
+      }
+
+      async function streamConversation(payload) {
+        controller = new AbortController();
+        setBusy(true);
+        clearLog();
+        resetSummary();
+        appendLog("client", { message: "开始接收事件流" });
+
+        try {
+          const response = await fetch("/conversation", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+
+          if (!response.ok || !response.body) {
+            const errorText = await response.text();
+            throw new Error(
+              `服务返回状态 ${response.status}: ${errorText || "无响应正文"}`
+            );
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          let buffer = "";
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              break;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            let separatorIndex;
+            while ((separatorIndex = buffer.indexOf("\n\n")) !== -1) {
+              const rawEvent = buffer.slice(0, separatorIndex);
+              buffer = buffer.slice(separatorIndex + 2);
+              if (!rawEvent.trim()) {
+                continue;
+              }
+              const { eventType, data } = parseSseChunk(rawEvent);
+              if (!data) {
+                continue;
+              }
+              try {
+                const parsed = JSON.parse(data);
+                handleEvent(eventType, parsed);
+              } catch (err) {
+                appendLog("client-error", { message: "解析事件负载失败", raw: data }, "warn");
+              }
+            }
+          }
+
+          if (buffer.trim()) {
+            const { eventType, data } = parseSseChunk(buffer.trim());
+            if (data) {
+              try {
+                const parsed = JSON.parse(data);
+                handleEvent(eventType, parsed);
+              } catch (err) {
+                appendLog("client-error", { message: "解析剩余事件负载失败", raw: data }, "warn");
+              }
+            }
+          }
+
+          appendLog("client", { message: "事件流结束" });
+        } catch (error) {
+          if (controller.signal.aborted) {
+            appendLog("client", { message: "已手动中止事件流" }, "warn");
+          } else {
+            appendLog(
+              "client-error",
+              { message: error instanceof Error ? error.message : String(error) },
+              "error"
+            );
+            updateSummary({ status: "错误" });
+          }
+        } finally {
+          controller = null;
+          setBusy(false);
+        }
+      }
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (controller) {
+          appendLog("client", { message: "已有请求正在运行，请先停止再发起新的请求。" }, "warn");
+          return;
+        }
+
+        const message = document.getElementById("message").value.trim();
+        if (!message) {
+          appendLog("client-error", { message: "必须填写任务描述" }, "error");
+          return;
+        }
+
+        const gitReposRaw = document.getElementById("gitRepos").value;
+        const gitRepos = gitReposRaw
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+
+        const gitToken = document.getElementById("gitToken").value.trim();
+        const workspaceId = document.getElementById("workspaceId").value.trim();
+        const conversationId = document.getElementById("conversationId").value.trim();
+
+        const payload = { message };
+        if (gitRepos.length > 0) {
+          payload.git_repos = gitRepos;
+        }
+        if (gitToken) {
+          payload.git_token = gitToken;
+        }
+        if (workspaceId) {
+          payload.workspace_id = workspaceId;
+        }
+        if (conversationId) {
+          payload.conversation_id = conversationId;
+        }
+
+        streamConversation(payload);
+      });
+
+      stopButton.addEventListener("click", () => {
+        if (controller) {
+          controller.abort();
+        }
+      });
+    </script>
+  </body>
+</html>
