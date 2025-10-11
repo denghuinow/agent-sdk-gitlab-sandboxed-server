@@ -166,12 +166,6 @@
     <h1>GitLab 工作区沙箱服务器控制台</h1>
     <form id="conversationForm">
       <fieldset>
-        <label for="message">
-          任务描述
-          <textarea id="message" name="message" placeholder="告诉代理你希望完成的具体任务" required></textarea>
-        </label>
-      </fieldset>
-      <fieldset>
         <label for="gitRepos">
           Git 仓库列表（每行一个）
           <textarea id="gitRepos" name="gitRepos" placeholder="https://git.example.com/group/repo.git&#10;https://git.example.com/group/another.git"></textarea>
@@ -193,6 +187,12 @@
         <label for="conversationId">
           会话 ID（可选，用于恢复已有会话）
           <input id="conversationId" name="conversationId" type="text" autocomplete="off" placeholder="已有会话 ID" />
+        </label>
+      </fieldset>
+            <fieldset>
+        <label for="message">
+          任务描述
+          <textarea id="message" name="message" placeholder="告诉代理你希望完成的具体任务" required></textarea>
         </label>
       </fieldset>
       <div class="actions">
