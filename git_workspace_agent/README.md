@@ -11,7 +11,7 @@
 ## 启动方式
 
 ```bash
-uv run python git-workspace-agent/server.py
+uv run python git_workspace_agent/server.py
 ```
 
 服务启动后访问 <http://localhost:8000/>，即可打开精简版 Web 控制台：
