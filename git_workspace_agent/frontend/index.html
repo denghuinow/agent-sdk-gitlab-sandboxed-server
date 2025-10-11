@@ -220,6 +220,8 @@
       const summaryConversationId = document.getElementById("summaryConversationId");
       const summaryStatus = document.getElementById("summaryStatus");
       const logContainer = document.getElementById("log");
+      const workspaceInput = document.getElementById("workspaceId");
+      const conversationInput = document.getElementById("conversationId");
 
       let controller = null;
       let currentConversationId = null;
@@ -247,11 +249,17 @@
           currentWorkspaceId = workspaceId;
           summaryWorkspaceId.textContent = workspaceId;
           summaryWorkspaceId.classList.remove("muted");
+          if (workspaceInput) {
+            workspaceInput.value = workspaceId;
+          }
         }
         if (conversationId) {
           currentConversationId = conversationId;
           summaryConversationId.textContent = conversationId;
           summaryConversationId.classList.remove("muted");
+          if (conversationInput) {
+            conversationInput.value = conversationId;
+          }
         }
         if (status) {
           summaryStatus.textContent = status;
