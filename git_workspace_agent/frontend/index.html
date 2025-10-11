@@ -104,6 +104,40 @@
       #summary strong {
         font-weight: 700;
       }
+      .download-section {
+        margin-top: 1.5rem;
+        padding: 1.5rem;
+        border-radius: 0.75rem;
+        border: 1px solid rgba(15, 23, 42, 0.12);
+        background: rgba(248, 250, 252, 0.9);
+        display: grid;
+        gap: 1rem;
+      }
+      .download-section h2 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+      .download-controls {
+        display: grid;
+        gap: 0.75rem;
+      }
+      .download-label {
+        font-weight: 600;
+      }
+      .download-input-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+      }
+      .download-input-group input {
+        flex: 1 1 240px;
+        min-width: 0;
+      }
+      .download-input-group button {
+        flex: 0 0 auto;
+        white-space: nowrap;
+      }
       #log {
         margin-top: 1.5rem;
         height: 420px;
@@ -159,6 +193,10 @@
         #summary {
           background: rgba(30, 41, 59, 0.75);
         }
+        .download-section {
+          background: rgba(30, 41, 59, 0.75);
+          border-color: rgba(148, 163, 184, 0.12);
+        }
       }
     </style>
   </head>
@@ -206,6 +244,23 @@
       <div><strong>会话:</strong> <span id="summaryConversationId" class="muted">—</span></div>
       <div><strong>最新状态:</strong> <span id="summaryStatus" class="muted">空闲</span></div>
     </section>
+    <section class="download-section" aria-labelledby="downloadTitle">
+      <h2 id="downloadTitle">文件下载</h2>
+      <div class="download-controls">
+        <label class="download-label" for="downloadPath">文件相对路径</label>
+        <div class="download-input-group">
+          <input
+            id="downloadPath"
+            name="downloadPath"
+            type="text"
+            autocomplete="off"
+            placeholder="project/README.md"
+          />
+          <button id="downloadButton" type="button">下载</button>
+        </div>
+        <p class="muted">请输入相对于 project 目录的文件路径，然后点击下载。</p>
+      </div>
+    </section>
     <section>
       <h2>事件流</h2>
       <div id="log" aria-live="polite"></div>
@@ -222,6 +277,8 @@
       const logContainer = document.getElementById("log");
       const workspaceInput = document.getElementById("workspaceId");
       const conversationInput = document.getElementById("conversationId");
+      const downloadButton = document.getElementById("downloadButton");
+      const downloadPathInput = document.getElementById("downloadPath");
 
       let controller = null;
       let currentConversationId = null;
@@ -463,6 +520,83 @@
       stopButton.addEventListener("click", () => {
         if (controller) {
           controller.abort();
+        }
+      });
+
+      downloadButton?.addEventListener("click", async () => {
+        if (!downloadPathInput) {
+          return;
+        }
+
+        const relativePath = downloadPathInput.value.trim();
+        if (!relativePath) {
+          appendLog("client-error", { message: "请填写要下载的文件路径" }, "error");
+          downloadPathInput.focus();
+          return;
+        }
+
+        const workspaceIdValue =
+          (currentWorkspaceId && currentWorkspaceId.trim()) ||
+          (workspaceInput?.value.trim() ?? "");
+
+        if (!workspaceIdValue) {
+          appendLog("client-error", { message: "请先提供工作区 ID 或启动会话" }, "error");
+          if (workspaceInput) {
+            workspaceInput.focus();
+          }
+          return;
+        }
+
+        const requestUrl = new URL(
+          `/workspace/${encodeURIComponent(workspaceIdValue)}/project/file`,
+          window.location.origin
+        );
+        requestUrl.searchParams.set("file_path", relativePath);
+
+        downloadButton.disabled = true;
+        try {
+          const response = await fetch(requestUrl.toString());
+          if (!response.ok) {
+            let errorDetail;
+            try {
+              const data = await response.json();
+              errorDetail = data?.detail;
+            } catch (err) {
+              errorDetail = await response.text();
+            }
+            const message = errorDetail
+              ? `下载失败: ${String(errorDetail)}`
+              : `下载失败，状态码 ${response.status}`;
+            appendLog("client-error", { message }, "error");
+            return;
+          }
+
+          const blob = await response.blob();
+          const disposition = response.headers.get("Content-Disposition") ?? "";
+          const filenameMatch = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+          const fallbackName = relativePath.split(/[\\/]/).pop() || "下载文件";
+          const filename =
+            (filenameMatch && decodeURIComponent(filenameMatch[1] || filenameMatch[2])) ||
+            fallbackName;
+
+          const objectUrl = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = objectUrl;
+          anchor.download = filename;
+          document.body.append(anchor);
+          anchor.click();
+          anchor.remove();
+          URL.revokeObjectURL(objectUrl);
+
+          appendLog("client", { message: `已下载文件: ${relativePath}` });
+        } catch (error) {
+          appendLog(
+            "client-error",
+            { message: `下载过程中出现错误: ${error instanceof Error ? error.message : String(error)}` },
+            "error"
+          );
+        } finally {
+          downloadButton.disabled = false;
         }
       });
     </script>
