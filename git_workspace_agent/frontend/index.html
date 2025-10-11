@@ -104,7 +104,8 @@
       #summary strong {
         font-weight: 700;
       }
-      .download-section {
+      .download-section,
+      .vscode-section {
         margin-top: 1.5rem;
         padding: 1.5rem;
         border-radius: 0.75rem;
@@ -113,7 +114,8 @@
         display: grid;
         gap: 1rem;
       }
-      .download-section h2 {
+      .download-section h2,
+      .vscode-section h2 {
         margin: 0;
         font-size: 1.25rem;
       }
@@ -137,6 +139,12 @@
       .download-input-group button {
         flex: 0 0 auto;
         white-space: nowrap;
+      }
+      .vscode-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
       }
       #log {
         margin-top: 1.5rem;
@@ -193,7 +201,8 @@
         #summary {
           background: rgba(30, 41, 59, 0.75);
         }
-        .download-section {
+        .download-section,
+        .vscode-section {
           background: rgba(30, 41, 59, 0.75);
           border-color: rgba(148, 163, 184, 0.12);
         }
@@ -244,6 +253,13 @@
       <div><strong>会话:</strong> <span id="summaryConversationId" class="muted">—</span></div>
       <div><strong>最新状态:</strong> <span id="summaryStatus" class="muted">空闲</span></div>
     </section>
+    <section class="vscode-section" aria-labelledby="vscodeTitle">
+      <h2 id="vscodeTitle">VSCode</h2>
+      <p id="vscodeStatus" class="muted">等待任务启动以获取 VSCode 会话。</p>
+      <div class="vscode-actions">
+        <button id="openVscodeButton" type="button" disabled>打开 VSCode</button>
+      </div>
+    </section>
     <section class="download-section" aria-labelledby="downloadTitle">
       <h2 id="downloadTitle">文件下载</h2>
       <div class="download-controls">
@@ -279,10 +295,13 @@
       const conversationInput = document.getElementById("conversationId");
       const downloadButton = document.getElementById("downloadButton");
       const downloadPathInput = document.getElementById("downloadPath");
+      const openVscodeButton = document.getElementById("openVscodeButton");
+      const vscodeStatus = document.getElementById("vscodeStatus");
 
       let controller = null;
       let currentConversationId = null;
       let currentWorkspaceId = null;
+      let vscodeAvailable = false;
 
       function setBusy(isBusy) {
         startButton.disabled = isBusy;
@@ -299,6 +318,7 @@
         summaryConversationId.classList.add("muted");
         summaryStatus.textContent = "空闲";
         summaryStatus.classList.add("muted");
+        updateVscodeStatus({ available: false, message: "等待任务启动以获取 VSCode 会话。" });
       }
 
       function updateSummary({ workspaceId, conversationId, status }) {
@@ -324,6 +344,18 @@
         }
       }
 
+      function updateVscodeStatus({ available, message }) {
+        vscodeAvailable = Boolean(available);
+        if (openVscodeButton) {
+          openVscodeButton.disabled = !vscodeAvailable || !currentWorkspaceId;
+        }
+        if (vscodeStatus) {
+          vscodeStatus.textContent =
+            message || (vscodeAvailable ? "VSCode 已就绪，可点击打开。" : "VSCode 未就绪。");
+          vscodeStatus.classList.toggle("muted", !vscodeAvailable);
+        }
+      }
+
       function appendLog(eventType, payload, level = "info") {
         const entry = document.createElement("article");
         entry.className = `log-entry log-${level}`;
@@ -346,6 +378,31 @@
 
       function clearLog() {
         logContainer.textContent = "";
+      }
+
+      async function openVscodeWorkspace() {
+        if (!currentWorkspaceId) {
+          appendLog("client", { message: "缺少工作区 ID，无法打开 VSCode。" }, "warn");
+          return;
+        }
+        try {
+          updateVscodeStatus({ available: vscodeAvailable, message: "正在请求 VSCode 链接…" });
+          const response = await fetch(`/workspace/${encodeURIComponent(currentWorkspaceId)}/vscode`);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const data = await response.json();
+          if (data?.url) {
+            updateVscodeStatus({ available: true, message: "VSCode 已就绪。" });
+            window.open(data.url, "_blank", "noopener");
+          } else {
+            throw new Error("缺少 URL");
+          }
+        } catch (error) {
+          appendLog("client", { message: `获取 VSCode URL 失败: ${error.message}` }, "error");
+          updateVscodeStatus({ available: false, message: "VSCode 连接失败，请稍后重试。" });
+        }
       }
 
       function parseSseChunk(chunk) {
@@ -385,10 +442,14 @@
           updateSummary({ status: payload?.agent_status ?? "已完成" });
         } else if (eventType === "cleanup-complete") {
           updateSummary({ status: "清理完成" });
+          updateVscodeStatus({ available: false, message: "VSCode 会话已停止。" });
         } else if (eventType === "error") {
           updateSummary({ status: "错误" });
+          updateVscodeStatus({ available: false, message: "VSCode 暂不可用。" });
         } else if (eventType === "agent-event" && payload?.event_type) {
           updateSummary({ status: payload.event_type });
+        } else if (eventType === "vscode-ready") {
+          updateVscodeStatus({ available: true, message: "VSCode 已就绪，可点击打开。" });
         }
       }
 
@@ -521,6 +582,14 @@
         if (controller) {
           controller.abort();
         }
+      });
+
+      openVscodeButton?.addEventListener("click", () => {
+        if (!vscodeAvailable) {
+          appendLog("client", { message: "VSCode 尚未就绪。" }, "warn");
+          return;
+        }
+        void openVscodeWorkspace();
       });
 
       downloadButton?.addEventListener("click", async () => {

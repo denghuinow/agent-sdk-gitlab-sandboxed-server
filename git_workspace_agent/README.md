@@ -26,5 +26,6 @@ uv run python git_workspace_agent/server.py
 - `GET /workspace/{workspace_id}/conversations/{conversation_id}/events` — 输出已完成会话的事件归档
 - `GET /workspace/{workspace_id}/conversations/{conversation_id}/state` — 获取缓存的基础状态
 - `GET /workspace/{workspace_id}/project/file?file_path=` — 下载沙箱工作区内生成的文件
+- `GET /workspace/{workspace_id}/vscode` — 返回可直接打开的 VSCode Web IDE 链接
 
-该 Web 控制台基于浏览器 Fetch 的流式读取实现，是集成 `/conversation` 接口时的最小参考实现。
+该 Web 控制台基于浏览器 Fetch 的流式读取实现，是集成 `/conversation` 接口时的最小参考实现。同时界面会在代理启动沙箱后自动展示“打开 VSCode”按钮，方便直接进入相同的沙箱工作区。

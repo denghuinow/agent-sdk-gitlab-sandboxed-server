@@ -2,12 +2,15 @@ import asyncio
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 import json
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
-from fastapi import FastAPI, HTTPException
+from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from openhands.sdk.conversation.conversation import Conversation
 from pydantic import BaseModel, SecretStr
@@ -15,7 +18,12 @@ from pydantic import BaseModel, SecretStr
 from openhands.sdk import LLM, get_logger
 from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
 from openhands.tools.preset.default import get_default_agent
-from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build_agent_server_image
+from openhands.sdk.sandbox.docker import (
+    DockerSandboxedAgentServer,
+    _run,
+    build_agent_server_image,
+    find_available_tcp_port,
+)
 
 
 """
@@ -36,6 +44,8 @@ MAPPING_FILE = "conversation_mapping.json"
 _EVENT_FILE_PATTERN = re.compile(r"^event-(\d+)-([^.]+)\.json$")
 FRONTEND_DIR = Path(__file__).with_name("frontend")
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
+_VSCODE_INFO: dict[str, dict[str, Any]] = {}
+_VSCODE_LOCK = threading.RLock()
 
 
 class ConversationRequest(BaseModel):
@@ -114,6 +124,20 @@ def _safe_save_mapping(mapping_file: str, mapping: dict) -> None:
         raise HTTPException(status_code=500, detail="保存映射失败") from e
 
 
+def _set_vscode_info(workspace_id: str, info: dict[str, Any] | None) -> None:
+    with _VSCODE_LOCK:
+        if info is None:
+            _VSCODE_INFO.pop(workspace_id, None)
+        else:
+            _VSCODE_INFO[workspace_id] = info
+
+
+def _get_vscode_info(workspace_id: str) -> dict[str, Any] | None:
+    with _VSCODE_LOCK:
+        stored = _VSCODE_INFO.get(workspace_id)
+        return dict(stored) if stored else None
+
+
 def _event_file_sort_key(path: Path) -> tuple[int, str]:
     match = _EVENT_FILE_PATTERN.match(path.name)
     if match:
@@ -186,9 +210,57 @@ def _clone_repos_safe(project_dir: str, git_repos: list[str], git_token: str = N
             if token:
                 error_msg = error_msg.replace(token, "***")
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"克隆失败: {repo_url}\n{error_msg}"
             ) from e
+
+
+def _initialize_vscode(server: DockerSandboxedAgentServer, workspace_id: str) -> dict[str, Any] | None:
+    """尝试从沙箱服务器获取 VSCode 连接信息。"""
+
+    vscode_port = getattr(server, "vscode_host_port", None)
+    if not vscode_port:
+        logger.warning("VSCode 端口信息缺失，跳过初始化")
+        return None
+
+    params = {"base_url": f"http://{server.host}:{vscode_port}"}
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(f"{server.base_url}/api/vscode/url", params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("获取 VSCode URL 失败: %s", exc)
+        return None
+
+    url = payload.get("url") if isinstance(payload, dict) else None
+    if not url:
+        logger.info("VSCode 服务未返回 URL，可能未启用")
+        return None
+
+    parsed = urlparse(url)
+    token = None
+    remaining_query = ""
+    if parsed.query:
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        token_list = query_params.pop("tkn", None)
+        if token_list:
+            token = token_list[0]
+        if query_params:
+            remaining_query = urlencode(
+                [(key, value) for key, values in query_params.items() for value in values]
+            )
+
+    info = {
+        "port": vscode_port,
+        "token": token,
+        "path": parsed.path or "/",
+        "query": remaining_query,
+        "raw_url": url,
+        "created_at": time.time(),
+        "workspace_id": workspace_id,
+    }
+    return info
 
 
 def _create_sandbox_with_persistence(mount_dir: str):
@@ -201,6 +273,7 @@ def _create_sandbox_with_persistence(mount_dir: str):
                 host_port=0,  # 自动分配端口
             )
             self._mount_dir = mount_dir
+            self.vscode_host_port = find_available_tcp_port()
 
         def __enter__(self):
             # 验证 Docker
@@ -227,7 +300,10 @@ def _create_sandbox_with_persistence(mount_dir: str):
             run_cmd = [
                 "docker", "run", "--user", "0:0", "-d", "--platform", self._platform,
                 "--rm", "--name", f"agent-server-{int(time.time())}-{uuid.uuid4().hex[:8]}",
-                "-p", f"{self.host_port}:8000", *flags, self._image,
+                "-p", f"{self.host_port}:8000",
+                "-p", f"{self.vscode_host_port}:8001",
+                *flags,
+                self._image,
                 "--host", "0.0.0.0", "--port", "8000"
             ]
             
@@ -357,7 +433,21 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
             nonlocal conversation_mapping
             conversation: RemoteConversation | None = None
             try:
+                _set_vscode_info(workspace_id, None)
                 with _create_sandbox_with_persistence(workspace_dir) as server:
+                    vscode_info = _initialize_vscode(server, workspace_id)
+                    if vscode_info:
+                        _set_vscode_info(workspace_id, vscode_info)
+                        push_event(
+                            "vscode-ready",
+                            {
+                                "workspace_id": workspace_id,
+                                "port": vscode_info.get("port"),
+                            },
+                        )
+                    else:
+                        logger.info("VSCode 服务不可用，继续执行任务")
+
                     agent = get_default_agent(
                         llm=llm,
                         working_dir="/workspace/project",
@@ -455,6 +545,7 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                         conversation.close()
                     except Exception:  # noqa: BLE001
                         logger.exception("关闭会话失败")
+                _set_vscode_info(workspace_id, None)
                 push_event(
                     "cleanup-complete",
                     {
@@ -505,6 +596,53 @@ async def get_conversation_events(workspace_id: str, conversation_id: str) -> di
         "conversation_id": normalized_conversation_id,
         "event_count": len(events),
         "events": events,
+    }
+
+
+@app.get("/workspace/{workspace_id}/vscode")
+async def get_workspace_vscode_url(workspace_id: str, request: Request) -> dict[str, Any]:
+    """返回 VSCode 连接所需的完整 URL。"""
+
+    normalized_workspace_id = _validate_workspace_id(workspace_id)
+    info = _get_vscode_info(normalized_workspace_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="VSCode 服务未就绪")
+
+    port = info.get("port")
+    token = info.get("token")
+    path = info.get("path") or "/"
+    query = info.get("query") or ""
+
+    if not port:
+        raise HTTPException(status_code=503, detail="VSCode 端口不可用")
+
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host")
+
+    scheme = forwarded_proto.split(",")[0].strip() if forwarded_proto else request.base_url.scheme
+    host_value = forwarded_host.split(",")[0].strip() if forwarded_host else request.base_url.hostname
+    if not host_value:
+        host_value = "localhost"
+
+    if ":" in host_value:
+        host_value = host_value.split(":")[0]
+
+    netloc = f"{host_value}:{port}"
+    url = f"{scheme}://{netloc}{path}"
+
+    query_parts = []
+    if query:
+        query_parts.append(query)
+    if token:
+        query_parts.append(f"tkn={token}")
+    if query_parts:
+        url = f"{url}?{'&'.join(query_parts)}"
+
+    return {
+        "workspace_id": normalized_workspace_id,
+        "url": url,
+        "port": port,
+        "has_token": bool(token),
     }
 
 
