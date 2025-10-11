@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 测试 GitLab 工作区沙箱服务器的 curl 请求
+# 测试 Git工作区智能体服务器的 curl 请求
 
 echo "=== 测试 1: 创建新对话 ==="
 curl -X 'POST' \

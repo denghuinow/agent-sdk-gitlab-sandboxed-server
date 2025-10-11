@@ -1,4 +1,4 @@
-# Git 工作区沙箱服务器
+# Git工作区智能体
 
 该目录提供一个独立的 FastAPI 服务：在 Docker 沙箱中启动 OpenHands 代理，并封装若干适用于 Git 仓库操作的 REST 接口。
 

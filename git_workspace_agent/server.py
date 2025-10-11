@@ -19,9 +19,10 @@ from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build
 
 
 """
-示例 25：Git 工作区沙箱服务器（优化版）
+Git工作区智能体服务器
+------------------------------------
+该模块实现了一个基于 FastAPI 的服务器，集成了 OpenHands Agent Server，并提供了与 Git 仓库交互的功能。主要功能包括：
 
-本例演示如何：
   1) 构建并启动 OpenHands Agent Server 的沙箱环境
   2) 创建一个 FastAPI 应用来处理 Git 仓库操作
  3) 与沙箱化的服务器交互以执行 Git 任务
