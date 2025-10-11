@@ -243,6 +243,7 @@
       <div><strong>工作区:</strong> <span id="summaryWorkspaceId" class="muted">—</span></div>
       <div><strong>会话:</strong> <span id="summaryConversationId" class="muted">—</span></div>
       <div><strong>最新状态:</strong> <span id="summaryStatus" class="muted">空闲</span></div>
+      <div><strong>VSCode:</strong> <span id="summaryVscode" class="muted">—</span></div>
     </section>
     <section class="download-section" aria-labelledby="downloadTitle">
       <h2 id="downloadTitle">文件下载</h2>
@@ -274,6 +275,7 @@
       const summaryWorkspaceId = document.getElementById("summaryWorkspaceId");
       const summaryConversationId = document.getElementById("summaryConversationId");
       const summaryStatus = document.getElementById("summaryStatus");
+      const summaryVscode = document.getElementById("summaryVscode");
       const logContainer = document.getElementById("log");
       const workspaceInput = document.getElementById("workspaceId");
       const conversationInput = document.getElementById("conversationId");
@@ -299,6 +301,10 @@
         summaryConversationId.classList.add("muted");
         summaryStatus.textContent = "空闲";
         summaryStatus.classList.add("muted");
+        if (summaryVscode) {
+          summaryVscode.textContent = "—";
+          summaryVscode.classList.add("muted");
+        }
       }
 
       function updateSummary({ workspaceId, conversationId, status }) {
@@ -321,6 +327,40 @@
         if (status) {
           summaryStatus.textContent = status;
           summaryStatus.classList.remove("muted");
+        }
+      }
+
+      function updateVscodeSummary(info) {
+        if (!summaryVscode) {
+          return;
+        }
+
+        summaryVscode.textContent = "";
+        summaryVscode.classList.remove("muted");
+
+        if (!info || info.enabled === false) {
+          summaryVscode.textContent = info?.error || "未启用";
+          summaryVscode.classList.add("muted");
+          return;
+        }
+
+        if (info.url) {
+          const link = document.createElement("a");
+          link.href = info.url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = info.running ? "打开 VSCode" : "VSCode 未运行";
+          summaryVscode.append(link);
+
+          if (!info.running) {
+            const note = document.createElement("span");
+            note.textContent = "（等待服务启动）";
+            note.style.marginLeft = "0.4rem";
+            summaryVscode.append(note);
+          }
+        } else {
+          summaryVscode.textContent = info.error || "暂无连接信息";
+          summaryVscode.classList.add("muted");
         }
       }
 
@@ -389,6 +429,8 @@
           updateSummary({ status: "错误" });
         } else if (eventType === "agent-event" && payload?.event_type) {
           updateSummary({ status: payload.event_type });
+        } else if (eventType === "vscode-status") {
+          updateVscodeSummary(payload);
         }
       }
 

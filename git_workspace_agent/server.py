@@ -7,7 +7,7 @@ import uuid
 import json
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from openhands.sdk.conversation.conversation import Conversation
 from pydantic import BaseModel, SecretStr
@@ -16,6 +16,9 @@ from openhands.sdk import LLM, get_logger
 from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
 from openhands.tools.preset.default import get_default_agent
 from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build_agent_server_image
+from openhands.sdk.sandbox.port_utils import find_available_tcp_port
+
+import httpx
 
 
 """
@@ -201,6 +204,8 @@ def _create_sandbox_with_persistence(mount_dir: str):
                 host_port=0,  # 自动分配端口
             )
             self._mount_dir = mount_dir
+            vscode_port = find_available_tcp_port()
+            self.vscode_host_port = vscode_port if vscode_port > 0 else None
 
         def __enter__(self):
             # 验证 Docker
@@ -224,11 +229,28 @@ def _create_sandbox_with_persistence(mount_dir: str):
                     flags.extend(["-e", f"{key}={os.environ[key]}"])
 
             # 运行容器
+            port_flags = ["-p", f"{self.host_port}:8000"]
+            if self.vscode_host_port is not None:
+                port_flags.extend(["-p", f"{self.vscode_host_port}:8001"])
+
             run_cmd = [
-                "docker", "run", "--user", "0:0", "-d", "--platform", self._platform,
-                "--rm", "--name", f"agent-server-{int(time.time())}-{uuid.uuid4().hex[:8]}",
-                "-p", f"{self.host_port}:8000", *flags, self._image,
-                "--host", "0.0.0.0", "--port", "8000"
+                "docker",
+                "run",
+                "--user",
+                "0:0",
+                "-d",
+                "--platform",
+                self._platform,
+                "--rm",
+                "--name",
+                f"agent-server-{int(time.time())}-{uuid.uuid4().hex[:8]}",
+                *port_flags,
+                *flags,
+                self._image,
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000",
             ]
             
             proc = _run(run_cmd)
@@ -272,8 +294,101 @@ def _format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+def _extract_public_host_name(request: Request) -> tuple[str, str]:
+    """解析请求中可用于外部访问的协议和主机名。"""
+
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if forwarded_proto:
+        forwarded_proto = forwarded_proto.split(",")[0].strip()
+    scheme = forwarded_proto or request.url.scheme or "http"
+
+    forwarded_host = request.headers.get("x-forwarded-host")
+    if forwarded_host:
+        forwarded_host = forwarded_host.split(",")[0].strip()
+
+    raw_host = (
+        forwarded_host
+        or request.headers.get("host")
+        or (request.client.host if request.client else "127.0.0.1")
+    )
+    raw_host = raw_host.strip()
+
+    if raw_host.startswith("[") and "]" in raw_host:
+        host_part = raw_host[1 : raw_host.index("]")]
+    else:
+        parts = raw_host.rsplit(":", 1)
+        host_part = parts[0] if len(parts) == 2 and parts[1].isdigit() else raw_host
+
+    return scheme, host_part
+
+
+def _fetch_vscode_metadata(
+    server: DockerSandboxedAgentServer,
+    scheme: str,
+    public_host: str,
+) -> dict:
+    """获取 VSCode 连接所需的运行状态与 URL。"""
+
+    result: dict[str, object | None] = {
+        "enabled": False,
+        "running": False,
+        "url": None,
+        "public_base_url": None,
+        "host_port": getattr(server, "vscode_host_port", None),
+        "error": None,
+    }
+
+    vscode_host_port = getattr(server, "vscode_host_port", None)
+    if vscode_host_port is None:
+        result["error"] = "未找到可用的 VSCode 端口映射"
+        return result
+
+    public_base_url = f"{scheme}://{public_host}:{vscode_host_port}"
+    result["public_base_url"] = public_base_url
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            status_resp = client.get(f"{server.base_url}/api/vscode/status")
+            if status_resp.status_code == 200:
+                status_data = status_resp.json()
+                result["enabled"] = bool(status_data.get("enabled", True))
+                result["running"] = bool(status_data.get("running", False))
+            elif status_resp.status_code == 503:
+                detail = status_resp.json().get("detail") if status_resp.content else None
+                result["error"] = detail or "VSCode 功能已禁用"
+                return result
+            else:
+                result["error"] = (
+                    f"无法获取 VSCode 状态，HTTP {status_resp.status_code}"
+                )
+                return result
+
+            url_resp = client.get(
+                f"{server.base_url}/api/vscode/url",
+                params={"base_url": public_base_url},
+            )
+            if url_resp.status_code == 200:
+                result["url"] = url_resp.json().get("url")
+                if result["url"] is None:
+                    result["error"] = "VSCode 返回了空的连接地址"
+            elif url_resp.status_code == 503:
+                detail = url_resp.json().get("detail") if url_resp.content else None
+                result["error"] = detail or "VSCode 功能未启用"
+            else:
+                result["error"] = (
+                    f"无法获取 VSCode 连接地址，HTTP {url_resp.status_code}"
+                )
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = str(exc)
+
+    return result
+
+
 @app.post("/conversation")
-async def handle_conversation(request: ConversationRequest) -> StreamingResponse:
+async def handle_conversation(
+    request: ConversationRequest,
+    raw_request: Request,
+) -> StreamingResponse:
     """创建或恢复对话，并通过 SSE 推送事件。"""
 
     api_key = os.getenv("LITELLM_API_KEY")
@@ -342,6 +457,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
     if not is_resume:
         _clone_repos_safe(project_dir, request.git_repos or [], request.git_token)
 
+    scheme, public_host = _extract_public_host_name(raw_request)
+
     async def event_stream():
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -402,6 +519,16 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                             "conversation_id": conversation_id_str,
                             "workspace_id": workspace_id,
                             "is_resume": is_resume,
+                        },
+                    )
+
+                    vscode_info = _fetch_vscode_metadata(server, scheme, public_host)
+                    push_event(
+                        "vscode-status",
+                        {
+                            "conversation_id": conversation_id_str,
+                            "workspace_id": workspace_id,
+                            **vscode_info,
                         },
                     )
 
