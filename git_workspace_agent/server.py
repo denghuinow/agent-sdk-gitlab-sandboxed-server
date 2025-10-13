@@ -79,6 +79,23 @@ def _validate_conversation_id(conversation_id: str) -> str:
     return clean_id
 
 
+def _resolve_conversation_dir(workspace_dir: Path, conversation_id: str) -> Path:
+    """根据会话 ID 解析会话目录，兼容 SDK 生成的不含横杠目录结构。"""
+
+    conversations_root = workspace_dir / "conversations"
+
+    hyphenless_id = conversation_id.replace("-", "")
+    hyphenless_dir = conversations_root / hyphenless_id
+    if hyphenless_dir.exists() and hyphenless_dir.is_dir():
+        return hyphenless_dir
+
+    fallback_dir = conversations_root / conversation_id
+    if fallback_dir.exists() and fallback_dir.is_dir():
+        return fallback_dir
+
+    return hyphenless_dir
+
+
 def _get_workspace_root() -> str:
     """获取工作空间根目录，确保目录存在。"""
     base_dir = os.environ.get("HOST_WORKSPACE_DIR", os.path.dirname(__file__))
@@ -481,7 +498,7 @@ async def get_conversation_events(workspace_id: str, conversation_id: str) -> di
     if not workspace_dir.exists() or not workspace_dir.is_dir():
         raise HTTPException(status_code=404, detail="工作空间不存在")
 
-    conversation_dir = workspace_dir / "conversations" / normalized_conversation_id
+    conversation_dir = _resolve_conversation_dir(workspace_dir, normalized_conversation_id)
     if not conversation_dir.exists() or not conversation_dir.is_dir():
         raise HTTPException(status_code=404, detail="会话不存在")
 
@@ -511,7 +528,7 @@ async def get_conversation_state(workspace_id: str, conversation_id: str) -> dic
     if not workspace_dir.exists() or not workspace_dir.is_dir():
         raise HTTPException(status_code=404, detail="工作空间不存在")
 
-    conversation_dir = workspace_dir / "conversations" / normalized_conversation_id
+    conversation_dir = _resolve_conversation_dir(workspace_dir, normalized_conversation_id)
     if not conversation_dir.exists() or not conversation_dir.is_dir():
         raise HTTPException(status_code=404, detail="会话不存在")
 
