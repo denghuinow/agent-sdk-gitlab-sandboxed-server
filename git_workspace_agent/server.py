@@ -21,7 +21,12 @@ from pydantic import BaseModel, SecretStr
 from openhands.sdk import LLM, get_logger
 from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
 from openhands.tools.preset.default import get_default_agent
-from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build_agent_server_image
+from openhands.sdk.sandbox.docker import (
+    DockerSandboxedAgentServer,
+    _run,
+    build_agent_server_image,
+)
+from openhands.sdk.sandbox import find_available_tcp_port
 
 
 """
@@ -218,12 +223,20 @@ def _create_sandbox_with_persistence(mount_dir: str):
     """创建带有持久化挂载的沙箱服务器。"""
     class PersistentSandbox(DockerSandboxedAgentServer):
         def __init__(self, mount_dir: str):
+            bind_host = os.environ.get("SANDBOX_BIND_HOST", "127.0.0.1")
             super().__init__(
                 base_image="ghcr.io/all-hands-ai/agent-server:latest-python",
                 mount_dir=mount_dir,
                 host_port=0,  # 自动分配端口
+                host=bind_host,
             )
             self._mount_dir = mount_dir
+            self.public_host = os.environ.get("SANDBOX_PUBLIC_HOST", self.host)
+            self.public_scheme = os.environ.get("SANDBOX_PUBLIC_SCHEME", "http")
+            self.vscode_host_port = find_available_tcp_port()
+            self.vscode_base_url = (
+                f"{self.public_scheme}://{self.public_host}:{self.vscode_host_port}"
+            )
 
         def __enter__(self):
             # 验证 Docker
@@ -250,7 +263,10 @@ def _create_sandbox_with_persistence(mount_dir: str):
             run_cmd = [
                 "docker", "run", "--user", "0:0", "-d", "--platform", self._platform,
                 "--rm", "--name", f"agent-server-{int(time.time())}-{uuid.uuid4().hex[:8]}",
-                "-p", f"{self.host_port}:8000", *flags, self._image,
+                "-p", f"{self.host_port}:8000",
+                "-p", f"{self.vscode_host_port}:8001",
+                *flags,
+                self._image,
                 "--host", "0.0.0.0", "--port", "8000"
             ]
             
@@ -269,6 +285,7 @@ def _create_sandbox_with_persistence(mount_dir: str):
 
             self._wait_for_health()
             logger.info("API 服务器就绪: %s", self.base_url)
+            logger.info("VSCode 服务映射到: %s", self.vscode_base_url)
             return self
 
     return PersistentSandbox(mount_dir)
@@ -404,10 +421,29 @@ def _build_vscode_payload(
     return payload
 
 
+def _resolve_public_vscode_base(entry: SandboxEntry) -> str | None:
+    sandbox = entry.sandbox
+    explicit_base = getattr(sandbox, "vscode_base_url", None)
+    if explicit_base:
+        return explicit_base.rstrip("/")
+
+    host = getattr(sandbox, "public_host", None) or getattr(sandbox, "host", None)
+    port = getattr(sandbox, "vscode_host_port", None)
+    scheme = getattr(sandbox, "public_scheme", None) or "http"
+    if host and port:
+        return f"{scheme}://{host}:{port}"
+
+    cached_base = (entry.vscode_info or {}).get("base_url")
+    if cached_base:
+        return str(cached_base).rstrip("/")
+    return None
+
+
 def _fetch_vscode_info(entry: SandboxEntry) -> dict[str, Any] | None:
-    base_url = entry.sandbox.base_url.rstrip("/")
-    query = urlencode({"base_url": base_url})
-    request_url = f"{base_url}/api/vscode/url?{query}"
+    api_base_url = entry.sandbox.base_url.rstrip("/")
+    public_base_url = (_resolve_public_vscode_base(entry) or api_base_url).rstrip("/")
+    query = urlencode({"base_url": public_base_url})
+    request_url = f"{api_base_url}/api/vscode/url?{query}"
     try:
         with urllib_request.urlopen(request_url, timeout=10) as response:
             if response.status != 200:
@@ -423,10 +459,23 @@ def _fetch_vscode_info(entry: SandboxEntry) -> dict[str, Any] | None:
     if not url:
         return None
 
+    parsed_url = urlparse(url)
+    public_base = urlparse(public_base_url)
+    rewritten_url = urlunparse(
+        (
+            public_base.scheme or parsed_url.scheme,
+            public_base.netloc or parsed_url.netloc,
+            parsed_url.path,
+            parsed_url.params,
+            parsed_url.query,
+            parsed_url.fragment,
+        )
+    )
+
     return {
-        "url": url,
+        "url": rewritten_url,
         "fetched_at": time.time(),
-        "base_url": base_url,
+        "base_url": public_base_url,
     }
 
 

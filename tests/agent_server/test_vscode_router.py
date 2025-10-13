@@ -1,6 +1,7 @@
 """Tests for VSCode router."""
 
 import asyncio
+import json
 import time
 from unittest.mock import patch
 
@@ -340,3 +341,54 @@ def test_cleanup_expired_workspace(workspace_registry_cleanup):
     with workspace_server._REGISTRY_LOCK:
         assert workspace_id not in workspace_server._SANDBOX_REGISTRY
         assert workspace_id not in workspace_server._VSCODE_INFO
+
+
+def test_fetch_vscode_info_rewrites_public_mapping(monkeypatch):
+    """Ensure the VSCode URL host/port matches the public mapping configuration."""
+
+    class DummySandbox:
+        def __init__(self) -> None:
+            self.base_url = "http://127.0.0.1:34567"
+            self.public_host = "sandbox.example"
+            self.public_scheme = "https"
+            self.vscode_host_port = 45678
+            self.vscode_base_url = (
+                f"{self.public_scheme}://{self.public_host}:{self.vscode_host_port}"
+            )
+
+    entry = workspace_server.SandboxEntry(
+        sandbox=DummySandbox(),
+        workspace_dir="/tmp/public",
+        last_access=time.time(),
+        vscode_info=None,
+    )
+
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.status = 200
+
+        def __enter__(self):  # noqa: D401
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: D401
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps({"url": "http://localhost:8001/?tkn=abc"}).encode("utf-8")
+
+    expected_request = (
+        "http://127.0.0.1:34567/api/vscode/url?base_url="
+        "https%3A%2F%2Fsandbox.example%3A45678"
+    )
+
+    def fake_urlopen(url: str, timeout: float = 10.0):  # noqa: D401
+        assert url == expected_request
+        assert timeout == 10.0
+        return DummyResponse()
+
+    monkeypatch.setattr(workspace_server.urllib_request, "urlopen", fake_urlopen)
+
+    info = workspace_server._fetch_vscode_info(entry)
+    assert info is not None
+    assert info["base_url"] == "https://sandbox.example:45678"
+    assert info["url"] == "https://sandbox.example:45678/?tkn=abc"
