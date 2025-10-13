@@ -104,7 +104,8 @@
       #summary strong {
         font-weight: 700;
       }
-      .download-section {
+      .download-section,
+      .vscode-section {
         margin-top: 1.5rem;
         padding: 1.5rem;
         border-radius: 0.75rem;
@@ -116,6 +117,22 @@
       .download-section h2 {
         margin: 0;
         font-size: 1.25rem;
+      }
+      .vscode-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+      }
+      .vscode-status {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: baseline;
+        font-size: 0.95rem;
+      }
+      .vscode-status strong {
+        font-weight: 700;
       }
       .download-controls {
         display: grid;
@@ -193,7 +210,8 @@
         #summary {
           background: rgba(30, 41, 59, 0.75);
         }
-        .download-section {
+        .download-section,
+        .vscode-section {
           background: rgba(30, 41, 59, 0.75);
           border-color: rgba(148, 163, 184, 0.12);
         }
@@ -244,6 +262,23 @@
       <div><strong>会话:</strong> <span id="summaryConversationId" class="muted">—</span></div>
       <div><strong>最新状态:</strong> <span id="summaryStatus" class="muted">空闲</span></div>
     </section>
+    <section class="vscode-section" aria-labelledby="vscodeTitle">
+      <h2 id="vscodeTitle">VSCode 远程开发</h2>
+      <p id="vscodeHint" class="muted">
+        启动一次会话后即可获取 VSCode 链接，空闲 30 分钟会自动回收。
+      </p>
+      <div class="vscode-controls">
+        <button id="openVscodeButton" type="button" disabled>打开 VSCode</button>
+        <button id="refreshVscodeButton" type="button" disabled>刷新链接</button>
+        <button id="stopVscodeButton" class="secondary" type="button" disabled>
+          释放沙箱
+        </button>
+      </div>
+      <div class="vscode-status">
+        <strong>链接状态:</strong>
+        <span id="vscodeStatusText" class="muted">未初始化</span>
+      </div>
+    </section>
     <section class="download-section" aria-labelledby="downloadTitle">
       <h2 id="downloadTitle">文件下载</h2>
       <div class="download-controls">
@@ -279,15 +314,22 @@
       const conversationInput = document.getElementById("conversationId");
       const downloadButton = document.getElementById("downloadButton");
       const downloadPathInput = document.getElementById("downloadPath");
+      const openVscodeButton = document.getElementById("openVscodeButton");
+      const refreshVscodeButton = document.getElementById("refreshVscodeButton");
+      const stopVscodeButton = document.getElementById("stopVscodeButton");
+      const vscodeStatusText = document.getElementById("vscodeStatusText");
+      const vscodeHint = document.getElementById("vscodeHint");
 
       let controller = null;
       let currentConversationId = null;
       let currentWorkspaceId = null;
+      let vscodeInfo = null;
 
       function setBusy(isBusy) {
         startButton.disabled = isBusy;
         stopButton.disabled = !isBusy;
         statusHint.textContent = isBusy ? "执行中…" : "就绪。";
+        updateVscodeButtons();
       }
 
       function resetSummary() {
@@ -299,6 +341,7 @@
         summaryConversationId.classList.add("muted");
         summaryStatus.textContent = "空闲";
         summaryStatus.classList.add("muted");
+        resetVscodeState();
       }
 
       function updateSummary({ workspaceId, conversationId, status }) {
@@ -309,6 +352,7 @@
           if (workspaceInput) {
             workspaceInput.value = workspaceId;
           }
+          updateVscodeButtons();
         }
         if (conversationId) {
           currentConversationId = conversationId;
@@ -322,6 +366,119 @@
           summaryStatus.textContent = status;
           summaryStatus.classList.remove("muted");
         }
+      }
+
+      function updateVscodeButtons() {
+        const workspaceSource =
+          (currentWorkspaceId ? currentWorkspaceId.trim() : "") ||
+          (workspaceInput ? workspaceInput.value.trim() : "");
+        if (refreshVscodeButton) {
+          refreshVscodeButton.disabled = !workspaceSource;
+        }
+        if (stopVscodeButton) {
+          stopVscodeButton.disabled = !workspaceSource;
+        }
+        if (openVscodeButton) {
+          openVscodeButton.disabled = !(vscodeInfo && vscodeInfo.url);
+        }
+      }
+
+      function resetVscodeState() {
+        vscodeInfo = null;
+        if (vscodeStatusText) {
+          vscodeStatusText.textContent = "未初始化";
+          vscodeStatusText.classList.add("muted");
+        }
+        if (vscodeHint) {
+          vscodeHint.textContent =
+            "启动一次会话后即可获取 VSCode 链接，空闲 30 分钟会自动回收。";
+        }
+        updateVscodeButtons();
+      }
+
+      function formatDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+          return "0秒";
+        }
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        if (mins >= 60) {
+          const hours = Math.floor(mins / 60);
+          const remainMins = mins % 60;
+          const parts = [];
+          if (hours > 0) {
+            parts.push(`${hours}小时`);
+          }
+          if (remainMins > 0) {
+            parts.push(`${remainMins}分钟`);
+          }
+          if (secs > 0 && hours === 0) {
+            parts.push(`${secs}秒`);
+          }
+          return parts.join("");
+        }
+        if (mins > 0) {
+          return secs > 0 ? `${mins}分${secs.toString().padStart(2, "0")}秒` : `${mins}分钟`;
+        }
+        return `${secs}秒`;
+      }
+
+      function translateSourceLabel(source) {
+        switch (source) {
+          case "fetch":
+            return "实时刷新";
+          case "cache":
+            return "缓存";
+          case "unavailable":
+            return "暂不可用";
+          default:
+            return source || "未知";
+        }
+      }
+
+      function updateVscodeDisplay(data) {
+        if (data) {
+          vscodeInfo = { ...(vscodeInfo ?? {}), ...data };
+        }
+        if (!vscodeInfo) {
+          resetVscodeState();
+          return;
+        }
+
+        const nowSeconds = Date.now() / 1000;
+        const expiresAt = Number(vscodeInfo.expires_at ?? Number.NaN);
+        let remainingSeconds = Number(vscodeInfo.remaining_seconds ?? Number.NaN);
+        if (Number.isFinite(expiresAt)) {
+          remainingSeconds = Math.max(0, expiresAt - nowSeconds);
+        }
+        if (!Number.isFinite(remainingSeconds)) {
+          remainingSeconds = 0;
+        }
+
+        const sourceLabel = translateSourceLabel(vscodeInfo.source);
+        if (vscodeStatusText) {
+          const baseLabel = vscodeInfo.url ? "可用" : "暂未取得 VSCode 链接";
+          const parts = [baseLabel];
+          if (remainingSeconds > 0) {
+            parts.push(`剩余约 ${formatDuration(remainingSeconds)}`);
+          }
+          parts.push(`来源：${sourceLabel}`);
+          vscodeStatusText.textContent = parts.join("，");
+          vscodeStatusText.classList.remove("muted");
+        }
+
+        if (vscodeHint) {
+          const ttlSeconds = Number(vscodeInfo.ttl_seconds ?? Number.NaN);
+          if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+            vscodeHint.textContent =
+              `沙箱空闲约 ${formatDuration(ttlSeconds)} 将自动回收，刷新链接或继续对话可延长保活。`;
+          } else {
+            vscodeHint.textContent =
+              "刷新链接或继续对话可延长沙箱的保活时间。";
+          }
+        }
+
+        updateVscodeButtons();
       }
 
       function appendLog(eventType, payload, level = "info") {
@@ -383,12 +540,130 @@
           updateSummary({ status: "排队中" });
         } else if (eventType === "conversation-finished") {
           updateSummary({ status: payload?.agent_status ?? "已完成" });
+        } else if (eventType === "vscode-info") {
+          updateVscodeDisplay(payload);
+          updateSummary({ status: "VSCode 就绪" });
         } else if (eventType === "cleanup-complete") {
           updateSummary({ status: "清理完成" });
         } else if (eventType === "error") {
           updateSummary({ status: "错误" });
         } else if (eventType === "agent-event" && payload?.event_type) {
           updateSummary({ status: payload.event_type });
+        }
+      }
+
+      function resolveWorkspaceIdForVscode() {
+        const fromState = currentWorkspaceId ? currentWorkspaceId.trim() : "";
+        if (fromState) {
+          return fromState;
+        }
+        return workspaceInput ? workspaceInput.value.trim() : "";
+      }
+
+      async function fetchVscodeInfo(showLog = true) {
+        const workspaceIdValue = resolveWorkspaceIdForVscode();
+        if (!workspaceIdValue) {
+          appendLog(
+            "client-error",
+            { message: "请先提供工作区 ID 再刷新 VSCode 链接" },
+            "error"
+          );
+          if (workspaceInput) {
+            workspaceInput.focus();
+          }
+          return;
+        }
+
+        updateSummary({ workspaceId: workspaceIdValue });
+        try {
+          const response = await fetch(
+            `/workspace/${encodeURIComponent(workspaceIdValue)}/vscode`
+          );
+          let data = null;
+          try {
+            data = await response.json();
+          } catch (err) {
+            data = null;
+          }
+          if (!response.ok) {
+            const detail = data?.detail || response.statusText;
+            appendLog(
+              "client-error",
+              { message: `获取 VSCode 链接失败: ${String(detail)}` },
+              "error"
+            );
+            if (response.status === 404) {
+              resetVscodeState();
+            }
+            return;
+          }
+          updateVscodeDisplay(data);
+          if (showLog) {
+            appendLog("client", { message: "已刷新 VSCode 链接", data });
+          }
+        } catch (error) {
+          appendLog(
+            "client-error",
+            {
+              message: `请求 VSCode 链接出错: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+            "error"
+          );
+        }
+      }
+
+      async function stopVscodeWorkspace() {
+        const workspaceIdValue = resolveWorkspaceIdForVscode();
+        if (!workspaceIdValue) {
+          appendLog(
+            "client-error",
+            { message: "请先提供工作区 ID 再尝试释放沙箱" },
+            "error"
+          );
+          if (workspaceInput) {
+            workspaceInput.focus();
+          }
+          return;
+        }
+
+        try {
+          const response = await fetch(
+            `/workspace/${encodeURIComponent(workspaceIdValue)}/vscode`,
+            { method: "DELETE" }
+          );
+          let data = null;
+          try {
+            data = await response.json();
+          } catch (err) {
+            data = null;
+          }
+          if (!response.ok) {
+            const detail = data?.detail || response.statusText;
+            appendLog(
+              "client-error",
+              { message: `释放沙箱失败: ${String(detail)}` },
+              "error"
+            );
+            return;
+          }
+          resetVscodeState();
+          appendLog(
+            "client",
+            { message: "已停止 VSCode 与沙箱", workspace_id: workspaceIdValue },
+            "info"
+          );
+        } catch (error) {
+          appendLog(
+            "client-error",
+            {
+              message: `释放沙箱时出错: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+            "error"
+          );
         }
       }
 
@@ -523,6 +798,31 @@
         }
       });
 
+      workspaceInput?.addEventListener("input", () => {
+        updateVscodeButtons();
+      });
+
+      openVscodeButton?.addEventListener("click", () => {
+        if (vscodeInfo?.url) {
+          window.open(vscodeInfo.url, "_blank", "noopener");
+          appendLog("client", { message: "已在新窗口打开 VSCode", url: vscodeInfo.url });
+        } else {
+          appendLog(
+            "client-error",
+            { message: "当前没有可用的 VSCode 链接，请先刷新。" },
+            "warn"
+          );
+        }
+      });
+
+      refreshVscodeButton?.addEventListener("click", () => {
+        fetchVscodeInfo();
+      });
+
+      stopVscodeButton?.addEventListener("click", () => {
+        stopVscodeWorkspace();
+      });
+
       downloadButton?.addEventListener("click", async () => {
         if (!downloadPathInput) {
           return;
@@ -599,6 +899,8 @@
           downloadButton.disabled = false;
         }
       });
+
+      resetVscodeState();
     </script>
   </body>
 </html>

@@ -1,5 +1,7 @@
 """Tests for VSCode router."""
 
+import asyncio
+import time
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +14,14 @@ from openhands.agent_server.vscode_router import (
     get_vscode_status,
     get_vscode_url,
 )
+
+from git_workspace_agent import server as workspace_server
+
+
+def run_async(coro):
+    """Execute an async coroutine in a synchronous test."""
+
+    return asyncio.run(coro)
 
 
 @pytest.fixture
@@ -29,63 +39,83 @@ def mock_vscode_service():
         yield mock.return_value
 
 
-@pytest.mark.asyncio
-async def test_get_vscode_url_success(mock_vscode_service):
+def test_get_vscode_url_success(mock_vscode_service):
     """Test getting VSCode URL successfully."""
-    mock_vscode_service.get_connection_token.return_value = "test-token"
-    mock_vscode_service.get_vscode_url.return_value = (
-        "http://localhost:8001/?tkn=test-token&folder=/workspace"
-    )
 
-    response = await get_vscode_url("http://localhost")
+    async def scenario() -> None:
+        mock_vscode_service.get_connection_token.return_value = "test-token"
+        mock_vscode_service.get_vscode_url.return_value = (
+            "http://localhost:8001/?tkn=test-token&folder=/workspace"
+        )
 
-    assert response.url == "http://localhost:8001/?tkn=test-token&folder=/workspace"
-    mock_vscode_service.get_vscode_url.assert_called_once_with("http://localhost")
+        response = await get_vscode_url("http://localhost")
+
+        assert (
+            response.url
+            == "http://localhost:8001/?tkn=test-token&folder=/workspace"
+        )
+        mock_vscode_service.get_vscode_url.assert_called_once_with("http://localhost")
+
+    run_async(scenario())
 
 
-@pytest.mark.asyncio
-async def test_get_vscode_url_error(mock_vscode_service):
+def test_get_vscode_url_error(mock_vscode_service):
     """Test getting VSCode URL with service error."""
-    mock_vscode_service.get_connection_token.side_effect = Exception("Service error")
 
-    with pytest.raises(HTTPException) as exc_info:
-        await get_vscode_url()
+    async def scenario() -> None:
+        mock_vscode_service.get_connection_token.side_effect = Exception(
+            "Service error"
+        )
 
-    assert exc_info.value.status_code == 500
-    assert "Failed to get VSCode URL" in str(exc_info.value.detail)
+        with pytest.raises(HTTPException) as exc_info:
+            await get_vscode_url()
+
+        assert exc_info.value.status_code == 500
+        assert "Failed to get VSCode URL" in str(exc_info.value.detail)
+
+    run_async(scenario())
 
 
-@pytest.mark.asyncio
-async def test_get_vscode_status_running(mock_vscode_service):
+def test_get_vscode_status_running(mock_vscode_service):
     """Test getting VSCode status when running."""
-    mock_vscode_service.is_running.return_value = True
 
-    response = await get_vscode_status()
+    async def scenario() -> None:
+        mock_vscode_service.is_running.return_value = True
 
-    assert response == {"running": True, "enabled": True}
-    mock_vscode_service.is_running.assert_called_once()
+        response = await get_vscode_status()
+
+        assert response == {"running": True, "enabled": True}
+        mock_vscode_service.is_running.assert_called_once()
+
+    run_async(scenario())
 
 
-@pytest.mark.asyncio
-async def test_get_vscode_status_not_running(mock_vscode_service):
+def test_get_vscode_status_not_running(mock_vscode_service):
     """Test getting VSCode status when not running."""
-    mock_vscode_service.is_running.return_value = False
 
-    response = await get_vscode_status()
+    async def scenario() -> None:
+        mock_vscode_service.is_running.return_value = False
 
-    assert response == {"running": False, "enabled": True}
+        response = await get_vscode_status()
+
+        assert response == {"running": False, "enabled": True}
+
+    run_async(scenario())
 
 
-@pytest.mark.asyncio
-async def test_get_vscode_status_error(mock_vscode_service):
+def test_get_vscode_status_error(mock_vscode_service):
     """Test getting VSCode status with service error."""
-    mock_vscode_service.is_running.side_effect = Exception("Service error")
 
-    with pytest.raises(HTTPException) as exc_info:
-        await get_vscode_status()
+    async def scenario() -> None:
+        mock_vscode_service.is_running.side_effect = Exception("Service error")
 
-    assert exc_info.value.status_code == 500
-    assert "Failed to get VSCode status" in str(exc_info.value.detail)
+        with pytest.raises(HTTPException) as exc_info:
+            await get_vscode_status()
+
+        assert exc_info.value.status_code == 500
+        assert "Failed to get VSCode status" in str(exc_info.value.detail)
+
+    run_async(scenario())
 
 
 def test_vscode_router_endpoints_integration(client):
@@ -153,36 +183,42 @@ def test_vscode_router_endpoints_with_errors(client):
         assert data["detail"] == "Internal Server Error"
 
 
-@pytest.mark.asyncio
-async def test_get_vscode_url_disabled():
+def test_get_vscode_url_disabled():
     """Test getting VSCode URL when VSCode is disabled."""
-    with patch(
-        "openhands.agent_server.vscode_router.get_vscode_service"
-    ) as mock_service:
-        mock_service.return_value = None
 
-        with pytest.raises(HTTPException) as exc_info:
-            await get_vscode_url()
+    async def scenario() -> None:
+        with patch(
+            "openhands.agent_server.vscode_router.get_vscode_service"
+        ) as mock_service:
+            mock_service.return_value = None
 
-        assert exc_info.value.status_code == 503
-        assert "VSCode is disabled in configuration" in str(exc_info.value.detail)
+            with pytest.raises(HTTPException) as exc_info:
+                await get_vscode_url()
+
+            assert exc_info.value.status_code == 503
+            assert "VSCode is disabled in configuration" in str(exc_info.value.detail)
+
+    run_async(scenario())
 
 
-@pytest.mark.asyncio
-async def test_get_vscode_status_disabled():
+def test_get_vscode_status_disabled():
     """Test getting VSCode status when VSCode is disabled."""
-    with patch(
-        "openhands.agent_server.vscode_router.get_vscode_service"
-    ) as mock_service:
-        mock_service.return_value = None
 
-        response = await get_vscode_status()
+    async def scenario() -> None:
+        with patch(
+            "openhands.agent_server.vscode_router.get_vscode_service"
+        ) as mock_service:
+            mock_service.return_value = None
 
-        assert response == {
-            "running": False,
-            "enabled": False,
-            "message": "VSCode is disabled in configuration",
-        }
+            response = await get_vscode_status()
+
+            assert response == {
+                "running": False,
+                "enabled": False,
+                "message": "VSCode is disabled in configuration",
+            }
+
+    run_async(scenario())
 
 
 def test_vscode_router_disabled_integration(client):
@@ -218,3 +254,89 @@ def test_vscode_router_disabled_integration(client):
         assert data["running"] is False
         assert data["enabled"] is False
         assert "VSCode is disabled in configuration" in data["message"]
+
+
+@pytest.fixture
+def workspace_registry_cleanup():
+    """Ensure the workspace sandbox registry is cleared after tests."""
+
+    with workspace_server._REGISTRY_LOCK:
+        workspace_server._SANDBOX_REGISTRY.clear()
+        workspace_server._VSCODE_INFO.clear()
+
+    yield
+
+    with workspace_server._REGISTRY_LOCK:
+        workspace_server._SANDBOX_REGISTRY.clear()
+        workspace_server._VSCODE_INFO.clear()
+
+
+def test_workspace_vscode_endpoint_uses_cached_url(workspace_registry_cleanup):
+    """VSCode URL remains accessible from cache after a conversation finishes."""
+
+    class DummySandbox:
+        def __init__(self) -> None:
+            self.base_url = "http://127.0.0.1:12345"
+            self.closed = False
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: D401
+            self.closed = True
+
+    async def scenario() -> None:
+        workspace_id = "demo"
+        info = {
+            "url": "http://127.0.0.1:9001/?tkn=test",
+            "ttl_seconds": workspace_server.SANDBOX_IDLE_TTL,
+            "fetched_at": time.time(),
+            "base_url": "http://127.0.0.1:12345",
+        }
+        entry = workspace_server.SandboxEntry(
+            sandbox=DummySandbox(),
+            workspace_dir="/tmp/demo",
+            last_access=time.time(),
+            vscode_info=info,
+        )
+        with workspace_server._REGISTRY_LOCK:
+            workspace_server._SANDBOX_REGISTRY[workspace_id] = entry
+            workspace_server._VSCODE_INFO[workspace_id] = info
+
+        response = await workspace_server.get_workspace_vscode(workspace_id)
+
+        assert response["url"] == info["url"]
+        assert response["workspace_id"] == workspace_id
+        assert response["ttl_seconds"] == workspace_server.SANDBOX_IDLE_TTL
+        assert response["source"] == "cache"
+
+    run_async(scenario())
+
+
+def test_cleanup_expired_workspace(workspace_registry_cleanup):
+    """Idle workspaces should be cleaned up once TTL has passed."""
+
+    class DummySandbox:
+        def __init__(self) -> None:
+            self.base_url = "http://127.0.0.1:4567"
+            self.closed = False
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: D401
+            self.closed = True
+
+    sandbox = DummySandbox()
+    workspace_id = "timeout"
+    expired_at = time.time() - (workspace_server.SANDBOX_IDLE_TTL + 5)
+    entry = workspace_server.SandboxEntry(
+        sandbox=sandbox,
+        workspace_dir="/tmp/timeout",
+        last_access=expired_at,
+        vscode_info=None,
+    )
+    with workspace_server._REGISTRY_LOCK:
+        workspace_server._SANDBOX_REGISTRY[workspace_id] = entry
+
+    cleaned = workspace_server._cleanup_expired_entries(now=time.time())
+
+    assert workspace_id in cleaned
+    assert sandbox.closed is True
+    with workspace_server._REGISTRY_LOCK:
+        assert workspace_id not in workspace_server._SANDBOX_REGISTRY
+        assert workspace_id not in workspace_server._VSCODE_INFO
