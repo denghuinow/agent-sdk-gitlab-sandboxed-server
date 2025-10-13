@@ -279,10 +279,13 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
     api_key = os.getenv("LITELLM_API_KEY")
     assert api_key is not None, "未设置 LITELLM_API_KEY 环境变量。"
 
+    model = os.getenv("LLM_MODEL") or "openai/qwen3-next-80b-a3b-instruct"
+    base_url = os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
     llm = LLM(
         service_id="main-llm",
-        model="openai/qwen3-next-80b-a3b-instruct",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model=model,
+        base_url=base_url,
         api_key=SecretStr(api_key),
     )
 
@@ -408,14 +411,6 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                     logger.info("\n📋 对话 ID：%s", conversation.state.id)
                     logger.info("📝 正在发送消息…")
                     conversation.send_message(request.message)
-                    push_event(
-                        "message-queued",
-                        {
-                            "conversation_id": conversation_id_str,
-                            "workspace_id": workspace_id,
-                            "message": request.message,
-                        },
-                    )
 
                     logger.info("🚀 正在运行对话…")
                     conversation.run()
@@ -455,13 +450,6 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                         conversation.close()
                     except Exception:  # noqa: BLE001
                         logger.exception("关闭会话失败")
-                push_event(
-                    "cleanup-complete",
-                    {
-                        "conversation_id": conversation_id_holder["id"],
-                        "workspace_id": workspace_id,
-                    },
-                )
                 finish_stream()
 
         worker_task = asyncio.create_task(asyncio.to_thread(worker))
