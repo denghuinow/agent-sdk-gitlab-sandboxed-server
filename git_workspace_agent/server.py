@@ -401,9 +401,9 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                         logger.info("🔔 回调收到事件：%s\n%s", event_type, event)
                         last_event_time["ts"] = time.time()
                         payload = event.model_dump(mode="json")  # type: ignore[arg-type]
-                        payload["event_type"] = event_type
-                        payload["conversation_id"] = conversation_id_holder["id"]
-                        payload["workspace_id"] = workspace_id
+                        # payload["event_type"] = event_type
+                        # payload["conversation_id"] = conversation_id_holder["id"]
+                        # payload["workspace_id"] = workspace_id
                         push_event("agent-event", payload)
 
                     conversation_kwargs = dict(
