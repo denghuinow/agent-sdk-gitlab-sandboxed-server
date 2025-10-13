@@ -56,10 +56,11 @@ def _validate_workspace_id(workspace_id: str) -> str:
     if not workspace_id or not workspace_id.strip():
         raise HTTPException(status_code=400, detail="工作空间 ID 不能为空")
 
-    # 只保留字母数字和下划线，避免路径遍历攻击
-    clean_id = re.sub(r'[^a-zA-Z0-9_]', '', workspace_id.strip())
-    if not clean_id:
+    clean_id = workspace_id.strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", clean_id):
         raise HTTPException(status_code=400, detail="工作空间 ID 包含无效字符")
+    if "-" not in clean_id:
+        raise HTTPException(status_code=400, detail="工作空间 ID 必须包含横杠 (-)")
 
     return clean_id
 
@@ -72,6 +73,8 @@ def _validate_conversation_id(conversation_id: str) -> str:
     clean_id = conversation_id.strip()
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", clean_id):
         raise HTTPException(status_code=400, detail="会话 ID 包含无效字符")
+    if "-" not in clean_id:
+        raise HTTPException(status_code=400, detail="会话 ID 必须包含横杠 (-)")
 
     return clean_id
 
@@ -321,7 +324,7 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
         if workspace_id:
             logger.info("使用已有工作空间: %s", workspace_id)
         else:
-            workspace_id = uuid.uuid4().hex
+            workspace_id = str(uuid.uuid4())
             logger.info("创建新的工作空间: %s", workspace_id)
 
     workspace_dir = os.path.join(workspace_root, workspace_id)
