@@ -26,5 +26,14 @@ uv run python git_workspace_agent/server.py
 - `GET /workspace/{workspace_id}/conversations/{conversation_id}/events` — 输出已完成会话的事件归档
 - `GET /workspace/{workspace_id}/conversations/{conversation_id}/state` — 获取缓存的基础状态
 - `GET /workspace/{workspace_id}/project/file?file_path=` — 下载沙箱工作区内生成的文件
+- `GET /workspace/{workspace_id}/vscode` — 返回当前工作区可访问的 VSCode URL 及保活信息
+- `DELETE /workspace/{workspace_id}/vscode` — 主动释放 VSCode/沙箱进程，立即清除缓存
 
 该 Web 控制台基于浏览器 Fetch 的流式读取实现，是集成 `/conversation` 接口时的最小参考实现。
+
+### VSCode 保活策略
+
+- 服务会在每个 `workspace_id` 上复用 Docker 沙箱，并缓存 VSCode 连接信息，默认空闲 30 分钟（可通过环境变量 `SANDBOX_IDLE_TTL` 调整）后自动回收。
+- 任意对话、VSCode URL 请求或文件下载都会刷新“最近使用时间”，避免后台清理过早终止开发会话。
+- 若需要立即释放资源，可调用 `DELETE /workspace/{workspace_id}/vscode`，或等待后台清理任务定期回收。
+- VSCode 服务在容器内固定监听 8001 端口，进程启动时会自动映射到宿主机的可用端口；可通过 `SANDBOX_PUBLIC_HOST`/`SANDBOX_PUBLIC_SCHEME` 显式指定对外公布的访问域名与协议（未配置时默认沿用本地绑定地址）。

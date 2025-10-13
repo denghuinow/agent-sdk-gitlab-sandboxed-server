@@ -1,12 +1,18 @@
 import asyncio
+import json
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
-import json
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+from urllib.parse import urlencode, urlparse, urlunparse
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from openhands.sdk.conversation.conversation import Conversation
@@ -15,7 +21,12 @@ from pydantic import BaseModel, SecretStr
 from openhands.sdk import LLM, get_logger
 from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
 from openhands.tools.preset.default import get_default_agent
-from openhands.sdk.sandbox.docker import DockerSandboxedAgentServer, _run, build_agent_server_image
+from openhands.sdk.sandbox.docker import (
+    DockerSandboxedAgentServer,
+    _run,
+    build_agent_server_image,
+)
+from openhands.sdk.sandbox import find_available_tcp_port
 
 
 """
@@ -36,6 +47,24 @@ MAPPING_FILE = "conversation_mapping.json"
 _EVENT_FILE_PATTERN = re.compile(r"^event-(\d+)-([^.]+)\.json$")
 FRONTEND_DIR = Path(__file__).with_name("frontend")
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
+
+SANDBOX_IDLE_TTL = float(os.environ.get("SANDBOX_IDLE_TTL", "1800"))
+SANDBOX_CLEANUP_INTERVAL = float(os.environ.get("SANDBOX_CLEANUP_INTERVAL", "300"))
+
+
+@dataclass
+class SandboxEntry:
+    sandbox: DockerSandboxedAgentServer
+    workspace_dir: str
+    last_access: float
+    vscode_info: dict[str, Any] | None = None
+    active_sessions: int = 0
+
+
+_SANDBOX_REGISTRY: dict[str, SandboxEntry] = {}
+_VSCODE_INFO: dict[str, dict[str, Any]] = {}
+_REGISTRY_LOCK = threading.RLock()
+_CLEANUP_TASK: asyncio.Task | None = None
 
 
 class ConversationRequest(BaseModel):
@@ -195,12 +224,20 @@ def _create_sandbox_with_persistence(mount_dir: str):
     """创建带有持久化挂载的沙箱服务器。"""
     class PersistentSandbox(DockerSandboxedAgentServer):
         def __init__(self, mount_dir: str):
+            bind_host = os.environ.get("SANDBOX_BIND_HOST", "127.0.0.1")
             super().__init__(
                 base_image="ghcr.io/all-hands-ai/agent-server:latest-python",
                 mount_dir=mount_dir,
                 host_port=0,  # 自动分配端口
+                host=bind_host,
             )
             self._mount_dir = mount_dir
+            self.public_host = os.environ.get("SANDBOX_PUBLIC_HOST", self.host)
+            self.public_scheme = os.environ.get("SANDBOX_PUBLIC_SCHEME", "http")
+            self.vscode_host_port = find_available_tcp_port()
+            self.vscode_base_url = (
+                f"{self.public_scheme}://{self.public_host}:{self.vscode_host_port}"
+            )
 
         def __enter__(self):
             # 验证 Docker
@@ -227,7 +264,10 @@ def _create_sandbox_with_persistence(mount_dir: str):
             run_cmd = [
                 "docker", "run", "--user", "0:0", "-d", "--platform", self._platform,
                 "--rm", "--name", f"agent-server-{int(time.time())}-{uuid.uuid4().hex[:8]}",
-                "-p", f"{self.host_port}:8000", *flags, self._image,
+                "-p", f"{self.host_port}:8000",
+                "-p", f"{self.vscode_host_port}:8001",
+                *flags,
+                self._image,
                 "--host", "0.0.0.0", "--port", "8000"
             ]
             
@@ -246,10 +286,252 @@ def _create_sandbox_with_persistence(mount_dir: str):
 
             self._wait_for_health()
             logger.info("API 服务器就绪: %s", self.base_url)
+            logger.info("VSCode 服务映射到: %s", self.vscode_base_url)
             return self
 
     return PersistentSandbox(mount_dir)
 
+
+def _get_sandbox_entry(workspace_id: str) -> SandboxEntry | None:
+    with _REGISTRY_LOCK:
+        return _SANDBOX_REGISTRY.get(workspace_id)
+
+
+def _touch_workspace(workspace_id: str) -> float | None:
+    now = time.time()
+    with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if entry:
+            entry.last_access = now
+            return now
+    return None
+
+
+def _set_vscode_info(workspace_id: str, info: dict[str, Any] | None) -> None:
+    with _REGISTRY_LOCK:
+        if info is None:
+            _VSCODE_INFO.pop(workspace_id, None)
+            entry = _SANDBOX_REGISTRY.get(workspace_id)
+            if entry:
+                entry.vscode_info = None
+            return
+        _VSCODE_INFO[workspace_id] = info
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if entry:
+            entry.vscode_info = info
+
+
+def _get_vscode_info(workspace_id: str) -> dict[str, Any] | None:
+    with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if entry and entry.vscode_info:
+            return entry.vscode_info
+        return _VSCODE_INFO.get(workspace_id)
+
+
+def _ensure_sandbox_entry(
+    workspace_id: str, workspace_dir: str
+) -> tuple[SandboxEntry, bool]:
+    existing = _get_sandbox_entry(workspace_id)
+    if existing:
+        existing.last_access = time.time()
+        return existing, False
+
+    sandbox = _create_sandbox_with_persistence(workspace_dir)
+    server = sandbox.__enter__()
+    entry = SandboxEntry(
+        sandbox=server,
+        workspace_dir=workspace_dir,
+        last_access=time.time(),
+        vscode_info=_get_vscode_info(workspace_id),
+    )
+
+    with _REGISTRY_LOCK:
+        other = _SANDBOX_REGISTRY.get(workspace_id)
+        if other:
+            entry_to_use = other
+        else:
+            _SANDBOX_REGISTRY[workspace_id] = entry
+            entry_to_use = entry
+
+    if entry_to_use is not entry:
+        try:
+            sandbox.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            logger.exception("重复创建沙箱时清理失败: %s", workspace_id)
+        entry_to_use.last_access = time.time()
+        return entry_to_use, False
+
+    return entry, True
+
+
+def _acquire_workspace(workspace_id: str) -> bool:
+    with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if not entry:
+            return False
+        entry.active_sessions += 1
+        entry.last_access = time.time()
+        return True
+
+
+def _release_workspace(workspace_id: str) -> None:
+    with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if not entry:
+            return
+        if entry.active_sessions > 0:
+            entry.active_sessions -= 1
+        entry.last_access = time.time()
+
+
+def _dispose_workspace(workspace_id: str, *, force: bool = False) -> bool:
+    with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if not entry:
+            _VSCODE_INFO.pop(workspace_id, None)
+            return False
+        if entry.active_sessions > 0 and not force:
+            return False
+        entry = _SANDBOX_REGISTRY.pop(workspace_id, None)
+        _VSCODE_INFO.pop(workspace_id, None)
+    if not entry:
+        return False
+    try:
+        entry.sandbox.__exit__(None, None, None)
+    except Exception:  # noqa: BLE001
+        logger.exception("释放沙箱失败: %s", workspace_id)
+    return True
+
+
+def _collect_expired_workspaces(now: float | None = None) -> list[str]:
+    now = now or time.time()
+    with _REGISTRY_LOCK:
+        return [
+            workspace_id
+            for workspace_id, entry in _SANDBOX_REGISTRY.items()
+            if entry.active_sessions == 0
+            and now - entry.last_access > SANDBOX_IDLE_TTL
+        ]
+
+
+def _cleanup_expired_entries(now: float | None = None) -> list[str]:
+    expired = _collect_expired_workspaces(now)
+    disposed: list[str] = []
+    for workspace_id in expired:
+        if _dispose_workspace(workspace_id):
+            disposed.append(workspace_id)
+    return disposed
+
+
+def _cleanup_all_workspaces() -> None:
+    for workspace_id in list(_SANDBOX_REGISTRY.keys()):
+        _dispose_workspace(workspace_id, force=True)
+
+
+def _build_vscode_payload(
+    workspace_id: str,
+    entry: SandboxEntry,
+    info: dict[str, Any] | None,
+    source: str,
+) -> dict[str, Any]:
+    now = time.time()
+    expires_at = entry.last_access + SANDBOX_IDLE_TTL
+    remaining = max(0.0, expires_at - now)
+    payload: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "ttl_seconds": SANDBOX_IDLE_TTL,
+        "last_active": entry.last_access,
+        "expires_at": expires_at,
+        "remaining_seconds": remaining,
+        "source": source,
+    }
+    if info and info.get("url"):
+        payload["url"] = info["url"]
+    return payload
+
+
+def _resolve_public_vscode_base(entry: SandboxEntry) -> str | None:
+    sandbox = entry.sandbox
+    explicit_base = getattr(sandbox, "vscode_base_url", None)
+    if explicit_base:
+        return explicit_base.rstrip("/")
+
+    host = getattr(sandbox, "public_host", None) or getattr(sandbox, "host", None)
+    port = getattr(sandbox, "vscode_host_port", None)
+    scheme = getattr(sandbox, "public_scheme", None) or "http"
+    if host and port:
+        return f"{scheme}://{host}:{port}"
+
+    cached_base = (entry.vscode_info or {}).get("base_url")
+    if cached_base:
+        return str(cached_base).rstrip("/")
+    return None
+
+
+def _fetch_vscode_info(entry: SandboxEntry) -> dict[str, Any] | None:
+    api_base_url = entry.sandbox.base_url.rstrip("/")
+    public_base_url = (_resolve_public_vscode_base(entry) or api_base_url).rstrip("/")
+    query = urlencode({"base_url": public_base_url})
+    request_url = f"{api_base_url}/api/vscode/url?{query}"
+    try:
+        with urllib_request.urlopen(request_url, timeout=10) as response:
+            if response.status != 200:
+                raise RuntimeError(
+                    f"请求 VSCode URL 失败，状态码 {response.status}"
+                )
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib_error.URLError, RuntimeError, json.JSONDecodeError) as exc:
+        logger.warning("获取 VSCode URL 失败: %s", exc)
+        return None
+
+    url = data.get("url")
+    if not url:
+        return None
+
+    parsed_url = urlparse(url)
+    public_base = urlparse(public_base_url)
+    rewritten_url = urlunparse(
+        (
+            public_base.scheme or parsed_url.scheme,
+            public_base.netloc or parsed_url.netloc,
+            parsed_url.path,
+            parsed_url.params,
+            parsed_url.query,
+            parsed_url.fragment,
+        )
+    )
+
+    return {
+        "url": rewritten_url,
+        "fetched_at": time.time(),
+        "base_url": public_base_url,
+    }
+
+
+def _ensure_vscode_info_for_entry(
+    workspace_id: str, entry: SandboxEntry
+) -> tuple[dict[str, Any] | None, str]:
+    cached = _get_vscode_info(workspace_id)
+    if cached:
+        return cached, "cache"
+
+    fetched = _fetch_vscode_info(entry)
+    if fetched:
+        _set_vscode_info(workspace_id, fetched)
+        return fetched, "fetch"
+    return cached, "unavailable"
+
+
+async def _cleanup_loop() -> None:
+    try:
+        while True:
+            await asyncio.sleep(max(1.0, SANDBOX_CLEANUP_INTERVAL))
+            expired = await asyncio.to_thread(_cleanup_expired_entries)
+            if expired:
+                logger.info("已清理空闲工作空间: %s", ", ".join(expired))
+    except asyncio.CancelledError:  # noqa: PERF203
+        logger.info("后台清理任务已取消")
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -257,6 +539,26 @@ app = FastAPI(
     description="A server for handling Git repository operations with OpenHands agents (with persistence)",
     version="0.1.0"
 )
+
+
+@app.on_event("startup")
+async def _startup_cleanup_task() -> None:
+    global _CLEANUP_TASK
+    if _CLEANUP_TASK is None:
+        _CLEANUP_TASK = asyncio.create_task(_cleanup_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown_cleanup_task() -> None:
+    global _CLEANUP_TASK
+    if _CLEANUP_TASK is not None:
+        _CLEANUP_TASK.cancel()
+        try:
+            await _CLEANUP_TASK
+        except asyncio.CancelledError:  # noqa: PERF203
+            pass
+        _CLEANUP_TASK = None
+    await asyncio.to_thread(_cleanup_all_workspaces)
 
 
 @app.get("/")
@@ -356,88 +658,101 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
         def worker() -> None:
             nonlocal conversation_mapping
             conversation: RemoteConversation | None = None
+            acquired = False
             try:
-                with _create_sandbox_with_persistence(workspace_dir) as server:
-                    agent = get_default_agent(
-                        llm=llm,
-                        working_dir="/workspace/project",
-                        cli_mode=True,
-                    )
-                    agent = agent.model_copy(
-                        update={
-                            "mcp_config": {},
-                            "security_analyzer": None,
-                            "condenser": None,
-                        }
-                    )
+                entry, _ = _ensure_sandbox_entry(workspace_id, workspace_dir)
+                server = entry.sandbox
+                if _acquire_workspace(workspace_id):
+                    acquired = True
+                _touch_workspace(workspace_id)
 
-                    last_event_time = {"ts": time.time()}
-
-                    def event_callback(event) -> None:
-                        event_type = type(event).__name__
-                        logger.info("🔔 回调收到事件：%s\n%s", event_type, event)
-                        last_event_time["ts"] = time.time()
-                        payload = event.model_dump(mode="json")  # type: ignore[arg-type]
-                        payload["event_type"] = event_type
-                        payload["conversation_id"] = conversation_id_holder["id"]
-                        payload["workspace_id"] = workspace_id
-                        push_event("agent-event", payload)
-
-                    conversation_kwargs = dict(
-                        agent=agent,
-                        host=server.base_url,
-                        callbacks=[event_callback],
-                        visualize=True,
-                    )
-                    if is_resume and conversation_id:
-                        conversation_kwargs["conversation_id"] = conversation_id
-
-                    conversation = Conversation(**conversation_kwargs)
-                    assert isinstance(conversation, RemoteConversation)
-                    conversation_id_str = str(conversation.state.id)
-                    conversation_id_holder["id"] = conversation_id_str
+                info, source = _ensure_vscode_info_for_entry(workspace_id, entry)
+                if info:
                     push_event(
-                        "conversation-ready",
-                        {
-                            "conversation_id": conversation_id_str,
-                            "workspace_id": workspace_id,
-                            "is_resume": is_resume,
-                        },
+                        "vscode-info",
+                        _build_vscode_payload(workspace_id, entry, info, source),
                     )
 
-                    logger.info("\n📋 对话 ID：%s", conversation.state.id)
-                    logger.info("📝 正在发送消息…")
-                    conversation.send_message(request.message)
-                    push_event(
-                        "message-queued",
-                        {
-                            "conversation_id": conversation_id_str,
-                            "workspace_id": workspace_id,
-                            "message": request.message,
-                        },
-                    )
+                agent = get_default_agent(
+                    llm=llm,
+                    working_dir="/workspace/project",
+                    cli_mode=True,
+                )
+                agent = agent.model_copy(
+                    update={
+                        "mcp_config": {},
+                        "security_analyzer": None,
+                        "condenser": None,
+                    }
+                )
 
-                    logger.info("🚀 正在运行对话…")
-                    conversation.run()
-                    logger.info("✅ 任务完成！")
-                    logger.info("Agent 状态：%s", conversation.state.agent_status)
-                    push_event(
-                        "conversation-finished",
-                        {
-                            "conversation_id": conversation_id_str,
-                            "workspace_id": workspace_id,
-                            "agent_status": conversation.state.agent_status,
-                        },
-                    )
+                last_event_time = {"ts": time.time()}
 
-                    logger.info("⏳ 正在等待事件停止…")
-                    while time.time() - last_event_time["ts"] < 2.0:
-                        time.sleep(0.1)
-                    logger.info("✅ 事件已停止")
+                def event_callback(event) -> None:
+                    event_type = type(event).__name__
+                    logger.info("🔔 回调收到事件：%s\n%s", event_type, event)
+                    last_event_time["ts"] = time.time()
+                    payload = event.model_dump(mode="json")  # type: ignore[arg-type]
+                    payload["event_type"] = event_type
+                    payload["conversation_id"] = conversation_id_holder["id"]
+                    payload["workspace_id"] = workspace_id
+                    push_event("agent-event", payload)
 
-                    if not is_resume and conversation_id_str:
-                        conversation_mapping[conversation_id_str] = workspace_id
-                        _safe_save_mapping(conversation_mapping_file, conversation_mapping)
+                conversation_kwargs = dict(
+                    agent=agent,
+                    host=server.base_url,
+                    callbacks=[event_callback],
+                    visualize=True,
+                )
+                if is_resume and conversation_id:
+                    conversation_kwargs["conversation_id"] = conversation_id
+
+                conversation = Conversation(**conversation_kwargs)
+                assert isinstance(conversation, RemoteConversation)
+                conversation_id_str = str(conversation.state.id)
+                conversation_id_holder["id"] = conversation_id_str
+                push_event(
+                    "conversation-ready",
+                    {
+                        "conversation_id": conversation_id_str,
+                        "workspace_id": workspace_id,
+                        "is_resume": is_resume,
+                    },
+                )
+
+                logger.info("\n📋 对话 ID：%s", conversation.state.id)
+                logger.info("📝 正在发送消息…")
+                conversation.send_message(request.message)
+                push_event(
+                    "message-queued",
+                    {
+                        "conversation_id": conversation_id_str,
+                        "workspace_id": workspace_id,
+                        "message": request.message,
+                    },
+                )
+
+                logger.info("🚀 正在运行对话…")
+                conversation.run()
+                logger.info("✅ 任务完成！")
+                logger.info("Agent 状态：%s", conversation.state.agent_status)
+                push_event(
+                    "conversation-finished",
+                    {
+                        "conversation_id": conversation_id_str,
+                        "workspace_id": workspace_id,
+                        "agent_status": conversation.state.agent_status,
+                    },
+                )
+
+                logger.info("⏳ 正在等待事件停止…")
+                while time.time() - last_event_time["ts"] < 2.0:
+                    time.sleep(0.1)
+                logger.info("✅ 事件已停止")
+
+                if not is_resume and conversation_id_str:
+                    conversation_mapping[conversation_id_str] = workspace_id
+                    _safe_save_mapping(conversation_mapping_file, conversation_mapping)
 
             except Exception as exc:  # noqa: BLE001
                 logger.exception("会话处理失败")
@@ -455,6 +770,9 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                         conversation.close()
                     except Exception:  # noqa: BLE001
                         logger.exception("关闭会话失败")
+                if acquired:
+                    _release_workspace(workspace_id)
+                _touch_workspace(workspace_id)
                 push_event(
                     "cleanup-complete",
                     {
@@ -578,6 +896,48 @@ async def download_project_file(workspace_id: str, file_path: str) -> FileRespon
         raise HTTPException(status_code=404, detail="文件不存在")
 
     return FileResponse(path=requested_path, filename=requested_path.name)
+
+
+@app.get("/workspace/{workspace_id}/vscode")
+async def get_workspace_vscode(workspace_id: str) -> dict[str, Any]:
+    normalized_workspace_id = _validate_workspace_id(workspace_id)
+    entry = _get_sandbox_entry(normalized_workspace_id)
+    if not entry:
+        workspace_root = Path(_get_workspace_root())
+        workspace_dir = workspace_root / normalized_workspace_id
+        if not workspace_dir.exists() or not workspace_dir.is_dir():
+            raise HTTPException(status_code=404, detail="工作空间不存在")
+
+        try:
+            entry, _created = await asyncio.to_thread(
+                _ensure_sandbox_entry,
+                normalized_workspace_id,
+                str(workspace_dir),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("重新启动工作空间沙箱失败: %s", normalized_workspace_id)
+            raise HTTPException(status_code=500, detail="沙箱启动失败，请稍后重试") from exc
+
+    info, source = _ensure_vscode_info_for_entry(normalized_workspace_id, entry)
+    if not info:
+        raise HTTPException(status_code=503, detail="VSCode 暂不可用，请稍后重试")
+
+    _touch_workspace(normalized_workspace_id)
+    return _build_vscode_payload(normalized_workspace_id, entry, info, source)
+
+
+@app.delete("/workspace/{workspace_id}/vscode")
+async def delete_workspace_vscode(workspace_id: str) -> dict[str, Any]:
+    normalized_workspace_id = _validate_workspace_id(workspace_id)
+    disposed = await asyncio.to_thread(
+        _dispose_workspace, normalized_workspace_id, force=True
+    )
+    if not disposed:
+        raise HTTPException(status_code=404, detail="未找到需要停止的沙箱实例")
+    return {
+        "workspace_id": normalized_workspace_id,
+        "status": "stopped",
+    }
 
 
 if __name__ == "__main__":
