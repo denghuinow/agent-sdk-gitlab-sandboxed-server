@@ -424,7 +424,7 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                         {
                             "conversation_id": conversation_id_str,
                             "workspace_id": workspace_id,
-                            "is_resume": is_resume,
+                            # "is_resume": is_resume,
                         },
                     )
 
