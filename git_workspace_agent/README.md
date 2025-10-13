@@ -6,6 +6,7 @@
 
 - 本地已运行 Docker
 - 已设置环境变量 `LITELLM_API_KEY`
+- （可选）通过环境变量 `LITELLM_MODEL`、`LITELLM_BASE_URL` 覆盖默认的 LLM 配置
 - 使用 `uv run` 初始化过的 Python 环境（参考项目根目录 README）
 
 ## 启动方式

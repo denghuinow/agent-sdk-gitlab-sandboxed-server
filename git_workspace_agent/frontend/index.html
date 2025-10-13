@@ -379,12 +379,8 @@
 
         if (eventType === "conversation-ready") {
           updateSummary({ status: "就绪" });
-        } else if (eventType === "message-queued") {
-          updateSummary({ status: "排队中" });
         } else if (eventType === "conversation-finished") {
           updateSummary({ status: payload?.agent_status ?? "已完成" });
-        } else if (eventType === "cleanup-complete") {
-          updateSummary({ status: "清理完成" });
         } else if (eventType === "error") {
           updateSummary({ status: "错误" });
         } else if (eventType === "agent-event" && payload?.event_type) {
