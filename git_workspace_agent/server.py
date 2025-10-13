@@ -58,6 +58,7 @@ class SandboxEntry:
     workspace_dir: str
     last_access: float
     vscode_info: dict[str, Any] | None = None
+    active_sessions: int = 0
 
 
 _SANDBOX_REGISTRY: dict[str, SandboxEntry] = {}
@@ -364,8 +365,34 @@ def _ensure_sandbox_entry(
     return entry, True
 
 
-def _dispose_workspace(workspace_id: str) -> bool:
+def _acquire_workspace(workspace_id: str) -> bool:
     with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if not entry:
+            return False
+        entry.active_sessions += 1
+        entry.last_access = time.time()
+        return True
+
+
+def _release_workspace(workspace_id: str) -> None:
+    with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if not entry:
+            return
+        if entry.active_sessions > 0:
+            entry.active_sessions -= 1
+        entry.last_access = time.time()
+
+
+def _dispose_workspace(workspace_id: str, *, force: bool = False) -> bool:
+    with _REGISTRY_LOCK:
+        entry = _SANDBOX_REGISTRY.get(workspace_id)
+        if not entry:
+            _VSCODE_INFO.pop(workspace_id, None)
+            return False
+        if entry.active_sessions > 0 and not force:
+            return False
         entry = _SANDBOX_REGISTRY.pop(workspace_id, None)
         _VSCODE_INFO.pop(workspace_id, None)
     if not entry:
@@ -383,20 +410,23 @@ def _collect_expired_workspaces(now: float | None = None) -> list[str]:
         return [
             workspace_id
             for workspace_id, entry in _SANDBOX_REGISTRY.items()
-            if now - entry.last_access > SANDBOX_IDLE_TTL
+            if entry.active_sessions == 0
+            and now - entry.last_access > SANDBOX_IDLE_TTL
         ]
 
 
 def _cleanup_expired_entries(now: float | None = None) -> list[str]:
     expired = _collect_expired_workspaces(now)
+    disposed: list[str] = []
     for workspace_id in expired:
-        _dispose_workspace(workspace_id)
-    return expired
+        if _dispose_workspace(workspace_id):
+            disposed.append(workspace_id)
+    return disposed
 
 
 def _cleanup_all_workspaces() -> None:
     for workspace_id in list(_SANDBOX_REGISTRY.keys()):
-        _dispose_workspace(workspace_id)
+        _dispose_workspace(workspace_id, force=True)
 
 
 def _build_vscode_payload(
@@ -628,9 +658,12 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
         def worker() -> None:
             nonlocal conversation_mapping
             conversation: RemoteConversation | None = None
+            acquired = False
             try:
                 entry, _ = _ensure_sandbox_entry(workspace_id, workspace_dir)
                 server = entry.sandbox
+                if _acquire_workspace(workspace_id):
+                    acquired = True
                 _touch_workspace(workspace_id)
 
                 info, source = _ensure_vscode_info_for_entry(workspace_id, entry)
@@ -737,6 +770,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                         conversation.close()
                     except Exception:  # noqa: BLE001
                         logger.exception("关闭会话失败")
+                if acquired:
+                    _release_workspace(workspace_id)
                 _touch_workspace(workspace_id)
                 push_event(
                     "cleanup-complete",
@@ -894,7 +929,9 @@ async def get_workspace_vscode(workspace_id: str) -> dict[str, Any]:
 @app.delete("/workspace/{workspace_id}/vscode")
 async def delete_workspace_vscode(workspace_id: str) -> dict[str, Any]:
     normalized_workspace_id = _validate_workspace_id(workspace_id)
-    disposed = await asyncio.to_thread(_dispose_workspace, normalized_workspace_id)
+    disposed = await asyncio.to_thread(
+        _dispose_workspace, normalized_workspace_id, force=True
+    )
     if not disposed:
         raise HTTPException(status_code=404, detail="未找到需要停止的沙箱实例")
     return {

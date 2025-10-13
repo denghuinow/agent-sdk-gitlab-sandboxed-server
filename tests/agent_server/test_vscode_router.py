@@ -405,6 +405,56 @@ def test_cleanup_expired_workspace(workspace_registry_cleanup):
         assert workspace_id not in workspace_server._VSCODE_INFO
 
 
+def test_cleanup_skips_active_workspace(workspace_registry_cleanup):
+    """Cleanup should skip workspaces that have active conversations."""
+
+    class DummySandbox:
+        def __init__(self) -> None:
+            self.base_url = "http://127.0.0.1:9999"
+            self.closed = False
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: D401
+            self.closed = True
+
+    sandbox = DummySandbox()
+    workspace_id = "busy"
+    expired_at = time.time() - (workspace_server.SANDBOX_IDLE_TTL + 5)
+    entry = workspace_server.SandboxEntry(
+        sandbox=sandbox,
+        workspace_dir="/tmp/busy",
+        last_access=expired_at,
+        vscode_info=None,
+    )
+
+    with workspace_server._REGISTRY_LOCK:
+        workspace_server._SANDBOX_REGISTRY[workspace_id] = entry
+
+    assert workspace_server._acquire_workspace(workspace_id) is True
+
+    with workspace_server._REGISTRY_LOCK:
+        workspace_server._SANDBOX_REGISTRY[workspace_id].last_access = expired_at
+
+    cleaned = workspace_server._cleanup_expired_entries(now=time.time())
+
+    assert cleaned == []
+    assert sandbox.closed is False
+
+    workspace_server._release_workspace(workspace_id)
+
+    with workspace_server._REGISTRY_LOCK:
+        reg_entry = workspace_server._SANDBOX_REGISTRY[workspace_id]
+        reg_entry.last_access = expired_at
+        reg_entry.active_sessions = 0
+
+    cleaned = workspace_server._cleanup_expired_entries(now=time.time())
+
+    assert workspace_id in cleaned
+    assert sandbox.closed is True
+
+    with workspace_server._REGISTRY_LOCK:
+        assert workspace_id not in workspace_server._SANDBOX_REGISTRY
+
+
 def test_fetch_vscode_info_rewrites_public_mapping(monkeypatch):
     """Ensure the VSCode URL host/port matches the public mapping configuration."""
 
