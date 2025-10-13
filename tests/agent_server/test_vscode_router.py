@@ -311,6 +311,68 @@ def test_workspace_vscode_endpoint_uses_cached_url(workspace_registry_cleanup):
     run_async(scenario())
 
 
+def test_workspace_vscode_endpoint_restarts_missing_sandbox(
+    workspace_registry_cleanup, tmp_path, monkeypatch
+):
+    """VSCode endpoint should restart sandbox when none is running."""
+
+    class DummySandbox:
+        def __init__(self) -> None:
+            self.base_url = "http://127.0.0.1:6789"
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: D401
+            return None
+
+    workspace_id = "revive"
+    workspace_dir = tmp_path / workspace_id
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    entry = workspace_server.SandboxEntry(
+        sandbox=DummySandbox(),
+        workspace_dir=str(workspace_dir),
+        last_access=time.time(),
+        vscode_info=None,
+    )
+
+    created: dict[str, bool] = {"called": False}
+
+    def fake_ensure_sandbox_entry(w_id: str, w_dir: str):  # noqa: D401
+        assert w_id == workspace_id
+        assert w_dir == str(workspace_dir)
+        created["called"] = True
+        with workspace_server._REGISTRY_LOCK:
+            workspace_server._SANDBOX_REGISTRY[w_id] = entry
+        return entry, True
+
+    def fake_ensure_vscode_info_for_entry(w_id: str, sandbox_entry):  # noqa: D401
+        assert sandbox_entry is entry
+        return {"url": "http://public.example:9100"}, "fetch"
+
+    monkeypatch.setattr(
+        workspace_server,
+        "_ensure_sandbox_entry",
+        fake_ensure_sandbox_entry,
+    )
+    monkeypatch.setattr(
+        workspace_server,
+        "_ensure_vscode_info_for_entry",
+        fake_ensure_vscode_info_for_entry,
+    )
+    monkeypatch.setattr(
+        workspace_server,
+        "_get_workspace_root",
+        lambda: str(tmp_path),
+    )
+
+    async def scenario() -> None:
+        response = await workspace_server.get_workspace_vscode(workspace_id)
+        assert response["url"] == "http://public.example:9100"
+        assert response["source"] == "fetch"
+
+    run_async(scenario())
+    assert created["called"] is True
+
+
 def test_cleanup_expired_workspace(workspace_registry_cleanup):
     """Idle workspaces should be cleaned up once TTL has passed."""
 

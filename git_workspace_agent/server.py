@@ -868,7 +868,20 @@ async def get_workspace_vscode(workspace_id: str) -> dict[str, Any]:
     normalized_workspace_id = _validate_workspace_id(workspace_id)
     entry = _get_sandbox_entry(normalized_workspace_id)
     if not entry:
-        raise HTTPException(status_code=404, detail="当前工作空间尚未启动沙箱")
+        workspace_root = Path(_get_workspace_root())
+        workspace_dir = workspace_root / normalized_workspace_id
+        if not workspace_dir.exists() or not workspace_dir.is_dir():
+            raise HTTPException(status_code=404, detail="工作空间不存在")
+
+        try:
+            entry, _created = await asyncio.to_thread(
+                _ensure_sandbox_entry,
+                normalized_workspace_id,
+                str(workspace_dir),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("重新启动工作空间沙箱失败: %s", normalized_workspace_id)
+            raise HTTPException(status_code=500, detail="沙箱启动失败，请稍后重试") from exc
 
     info, source = _ensure_vscode_info_for_entry(normalized_workspace_id, entry)
     if not info:
