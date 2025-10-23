@@ -201,6 +201,7 @@ cache
 
 .conversations*
 workspace/
+data/
 openapi.json
 .client/
 conversation_mapping.json

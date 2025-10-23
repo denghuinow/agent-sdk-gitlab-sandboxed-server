@@ -31,7 +31,7 @@ Git工作区智能体服务器
 
 logger = get_logger(__name__)
 
-WORKSPACE_SUBDIR = "workspace"
+WORKSPACE_SUBDIR = "data"
 MAPPING_FILE = "conversation_mapping.json"
 _EVENT_FILE_PATTERN = re.compile(r"^event-(\d+)-([^.]+)\.json$")
 FRONTEND_DIR = Path(__file__).with_name("frontend")
@@ -98,8 +98,8 @@ def _resolve_conversation_dir(workspace_dir: Path, conversation_id: str) -> Path
 
 def _get_workspace_root() -> str:
     """获取工作空间根目录，确保目录存在。"""
-    base_dir = os.environ.get("HOST_WORKSPACE_DIR", os.path.dirname(__file__))
-    workspace_root = os.path.join(base_dir, WORKSPACE_SUBDIR)
+    
+    workspace_root = os.environ.get("HOST_WORKSPACE_DIR", os.path.join(os.path.dirname(__file__), WORKSPACE_SUBDIR))
     os.makedirs(workspace_root, exist_ok=True)
     return workspace_root
 
@@ -108,7 +108,7 @@ def _safe_load_mapping(mapping_file: str) -> dict:
     """安全加载会话映射文件。"""
     if not os.path.exists(mapping_file):
         return {}
-    
+
     try:
         with open(mapping_file, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -142,7 +142,8 @@ def _event_file_sort_key(path: Path) -> tuple[int, str]:
 
 
 def _load_events_from_directory(events_dir: Path) -> list[dict]:
-    event_files = sorted(events_dir.glob("event-*-*.json"), key=_event_file_sort_key)
+    event_files = sorted(events_dir.glob(
+        "event-*-*.json"), key=_event_file_sort_key)
     events: list[dict] = []
     for event_file in event_files:
         try:
@@ -150,7 +151,8 @@ def _load_events_from_directory(events_dir: Path) -> list[dict]:
                 events.append(json.load(f))
         except json.JSONDecodeError as exc:
             logger.error("事件文件格式错误: %s", event_file)
-            raise HTTPException(status_code=500, detail=f"事件文件格式错误: {event_file.name}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"事件文件格式错误: {event_file.name}") from exc
         except OSError as exc:
             logger.error("读取事件文件失败: %s", event_file)
             raise HTTPException(status_code=500, detail="读取事件文件失败") from exc
@@ -163,7 +165,7 @@ def _clone_repos_safe(project_dir: str, git_repos: list[str], git_token: str = N
         return
 
     token = git_token.strip() if git_token else ""
-    
+
     for repo_url in git_repos:
         repo_url = repo_url.strip()
         if not repo_url:
@@ -173,7 +175,7 @@ def _clone_repos_safe(project_dir: str, git_repos: list[str], git_token: str = N
         repo_name = os.path.basename(repo_url.rstrip('/')).replace('.git', '')
         if not repo_name:
             continue
-            
+
         # 验证仓库名的安全性
         import re
         if not re.match(r'^[a-zA-Z0-9_-]+$', repo_name):
@@ -206,7 +208,7 @@ def _clone_repos_safe(project_dir: str, git_repos: list[str], git_token: str = N
             if token:
                 error_msg = error_msg.replace(token, "***")
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"克隆失败: {repo_url}\n{error_msg}"
             ) from e
 
@@ -219,6 +221,7 @@ def _create_sandbox_with_persistence(mount_dir: str):
                 base_image="ghcr.io/all-hands-ai/agent-server:latest-python",
                 mount_dir=mount_dir,
                 host_port=0,  # 自动分配端口
+                forward_env=["OH_WORKSPACE_PATH","OH_CONVERSATIONS_PATH","OH_BASH_EVENTS_DIR"]
             )
             self._mount_dir = mount_dir
 
@@ -236,8 +239,9 @@ def _create_sandbox_with_persistence(mount_dir: str):
                 )
 
             # 准备 Docker 运行参数
-            flags = ["-v", f"{self._mount_dir}:/workspace"]
-            
+            flags = ["-v", f"{self._mount_dir}:/oh"]
+
+            flags.extend(["-v", f"{self._mount_dir}/project:/workspace"])
             # 添加环境变量
             for key in self._forward_env:
                 if key in os.environ:
@@ -250,7 +254,7 @@ def _create_sandbox_with_persistence(mount_dir: str):
                 "-p", f"{self.host_port}:8000", *flags, self._image,
                 "--host", "0.0.0.0", "--port", "8000"
             ]
-            
+
             proc = _run(run_cmd)
             if proc.returncode != 0:
                 raise RuntimeError(f"启动容器失败: {proc.stderr}")
@@ -261,7 +265,8 @@ def _create_sandbox_with_persistence(mount_dir: str):
             # 启动日志线程
             if self.detach_logs:
                 from threading import Thread
-                self._logs_thread = Thread(target=self._stream_docker_logs, daemon=True)
+                self._logs_thread = Thread(
+                    target=self._stream_docker_logs, daemon=True)
                 self._logs_thread.start()
 
             self._wait_for_health()
@@ -300,7 +305,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
     assert api_key is not None, "未设置 LITELLM_API_KEY 环境变量。"
 
     model = os.getenv("LLM_MODEL") or "openai/qwen3-next-80b-a3b-instruct"
-    base_url = os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    base_url = os.getenv(
+        "LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     llm = LLM(
         service_id="main-llm",
@@ -327,7 +333,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                 status_code=404,
                 detail=f"未找到对话ID的映射: {conversation_id}",
             )
-        mapped_workspace_id = _validate_workspace_id(conversation_mapping[conversation_id])
+        mapped_workspace_id = _validate_workspace_id(
+            conversation_mapping[conversation_id])
         if workspace_id and workspace_id != mapped_workspace_id:
             raise HTTPException(
                 status_code=400,
@@ -363,7 +370,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
     project_dir = os.path.join(workspace_dir, "project")
     os.makedirs(project_dir, exist_ok=True)
     if not is_resume:
-        _clone_repos_safe(project_dir, request.git_repos or [], request.git_token)
+        _clone_repos_safe(
+            project_dir, request.git_repos or [], request.git_token)
 
     async def event_stream():
         loop = asyncio.get_running_loop()
@@ -371,7 +379,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
         conversation_id_holder: dict[str | None] = {"id": None}
 
         def push_event(event_name: str, data: dict) -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, _format_sse(event_name, data))
+            loop.call_soon_threadsafe(
+                queue.put_nowait, _format_sse(event_name, data))
 
         def finish_stream() -> None:
             loop.call_soon_threadsafe(queue.put_nowait, None)
@@ -383,7 +392,7 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                 with _create_sandbox_with_persistence(workspace_dir) as server:
                     agent = get_default_agent(
                         llm=llm,
-                        working_dir="/workspace/project",
+                        working_dir="/workspace",
                         cli_mode=True,
                     )
                     agent = agent.model_copy(
@@ -400,7 +409,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
                         event_type = type(event).__name__
                         logger.info("🔔 回调收到事件：%s\n%s", event_type, event)
                         last_event_time["ts"] = time.time()
-                        payload = event.model_dump(mode="json")  # type: ignore[arg-type]
+                        # type: ignore[arg-type]
+                        payload = event.model_dump(mode="json")
                         # payload["event_type"] = event_type
                         # payload["conversation_id"] = conversation_id_holder["id"]
                         # payload["workspace_id"] = workspace_id
@@ -452,7 +462,8 @@ async def handle_conversation(request: ConversationRequest) -> StreamingResponse
 
                     if not is_resume and conversation_id_str:
                         conversation_mapping[conversation_id_str] = workspace_id
-                        _safe_save_mapping(conversation_mapping_file, conversation_mapping)
+                        _safe_save_mapping(
+                            conversation_mapping_file, conversation_mapping)
 
             except Exception as exc:  # noqa: BLE001
                 logger.exception("会话处理失败")
@@ -498,7 +509,8 @@ async def get_conversation_events(workspace_id: str, conversation_id: str) -> di
     if not workspace_dir.exists() or not workspace_dir.is_dir():
         raise HTTPException(status_code=404, detail="工作空间不存在")
 
-    conversation_dir = _resolve_conversation_dir(workspace_dir, normalized_conversation_id)
+    conversation_dir = _resolve_conversation_dir(
+        workspace_dir, normalized_conversation_id)
     if not conversation_dir.exists() or not conversation_dir.is_dir():
         raise HTTPException(status_code=404, detail="会话不存在")
 
@@ -528,7 +540,8 @@ async def get_conversation_state(workspace_id: str, conversation_id: str) -> dic
     if not workspace_dir.exists() or not workspace_dir.is_dir():
         raise HTTPException(status_code=404, detail="工作空间不存在")
 
-    conversation_dir = _resolve_conversation_dir(workspace_dir, normalized_conversation_id)
+    conversation_dir = _resolve_conversation_dir(
+        workspace_dir, normalized_conversation_id)
     if not conversation_dir.exists() or not conversation_dir.is_dir():
         raise HTTPException(status_code=404, detail="会话不存在")
 
@@ -590,4 +603,13 @@ async def download_project_file(workspace_id: str, file_path: str) -> FileRespon
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7213)
+    import argparse
+    parser = argparse.ArgumentParser(description="OpenHands Agent Server App")
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=7213, help="Port to bind to (default: 8000)"
+    )
+    args = parser.parse_args()
+    uvicorn.run(app,host=args.host,port=args.port)
